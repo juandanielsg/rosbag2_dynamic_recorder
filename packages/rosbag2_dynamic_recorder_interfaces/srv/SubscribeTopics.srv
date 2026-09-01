@@ -1,0 +1,21 @@
+# Fully qualified topic names to subscribe the recorder to.
+string[] topics
+
+# Optional list of topic types matching `topics` by index; must be the same length as `topics`
+# when provided. An empty entry requests type discovery from the ROS graph, which succeeds only
+# when the topic currently offers exactly one type.
+string[] topic_types
+
+---
+
+# Return code. 0 on success; 1 when none of the requested topics got subscribed, or on error.
+int32 return_code
+
+# Error string. Empty if no error occurred.
+string error_string
+
+# Topics subscribed after handling the request. Includes topics already subscribed before the call.
+string[] subscribed_topics
+
+# Topics that could not be subscribed: not present on the graph, invalid name, or ambiguous type.
+string[] unavailable_topics

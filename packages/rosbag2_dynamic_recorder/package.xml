@@ -1,0 +1,34 @@
+<?xml version="1.0"?>
+<?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
+<package format="3">
+  <name>rosbag2_dynamic_recorder</name>
+  <version>0.1.0</version>
+  <description>
+    A rosbag2 recorder that owns its subscriptions, so the recorded topic set can be changed at
+    runtime without stopping the writer or splitting the bag. Writes standard rosbag2 bags through
+    rosbag2_cpp::Writer, so ros2 bag play, mcap tooling and Foxglove all keep working.
+
+    See notes/architecture.md for why this is built on Writer rather than on
+    rosbag2_transport::Recorder.
+  </description>
+  <maintainer email="jdsglez@gmail.com">juandanielsg</maintainer>
+  <license>Apache-2.0</license>
+
+  <buildtool_depend>ament_cmake</buildtool_depend>
+
+  <depend>rclcpp</depend>
+  <depend>rosbag2_cpp</depend>
+  <depend>rosbag2_storage</depend>
+  <depend>rosbag2_interfaces</depend>
+  <!-- For the public type_description_hash_for_topic() helper only; the Recorder itself is
+       deliberately not used. -->
+  <depend>rosbag2_transport</depend>
+  <depend>rosbag2_dynamic_recorder_interfaces</depend>
+  <depend>rmw</depend>
+
+  <exec_depend>rosbag2_storage_mcap</exec_depend>
+
+  <export>
+    <build_type>ament_cmake</build_type>
+  </export>
+</package>

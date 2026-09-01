@@ -1,0 +1,26 @@
+# Atomically replace the recorded topic set with exactly this list.
+# Topics currently subscribed but absent here are unsubscribed; topics here but not currently
+# subscribed are subscribed; topics in both are left untouched and keep recording without a gap.
+string[] topics
+
+# Optional list of topic types matching `topics` by index; must be the same length as `topics`
+# when provided. An empty entry requests type discovery from the ROS graph.
+string[] topic_types
+
+---
+
+# Return code. 0 on success; 1 on error. Note that an empty `topics` list is a valid request that
+# unsubscribes everything, and is reported as success.
+int32 return_code
+
+# Error string. Empty if no error occurred.
+string error_string
+
+# Topics subscribed after handling the request.
+string[] subscribed_topics
+
+# Topics that were unsubscribed because they were absent from the requested set.
+string[] unsubscribed_topics
+
+# Requested topics that could not be subscribed: not present on the graph, invalid, or ambiguous.
+string[] unavailable_topics

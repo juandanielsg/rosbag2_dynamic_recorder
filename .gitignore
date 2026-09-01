@@ -1,0 +1,31 @@
+# Build artifacts
+build/
+install/
+log/
+
+# Upstream rosbag2 checkout. This is a clone of https://github.com/ros2/rosbag2.git with its own
+# .git, not our code -- tracking it here would nest a repo inside this one. Recreate with:
+#   git clone https://github.com/ros2/rosbag2.git src && git -C src checkout ae42fb9
+# (ae42fb9 = "Make the topic filter match the first message. (#2468)", the rolling commit this
+# work is based on.) Could be converted to a submodule later if the pin needs enforcing.
+# Leading slash matters: an unanchored `src/` would also match packages/*/src/ and silently
+# exclude our own source files.
+/src/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+
+# Editor / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# rosdep / vcs
+.rosdep
+*.repos.bak
+
+# Local-only working notes: upstream correspondence drafts, not part of the project.
+/private/

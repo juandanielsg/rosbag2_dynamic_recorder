@@ -1,0 +1,8 @@
+# Everything in this repo is consumed by Linux: the packages are built inside the dev container
+# via bind mounts, so a CRLF checkout on the Windows host reaches bash and CMake as-is. A shell
+# script with CRLF fails there with a confusing "\r: command not found".
+* text=auto eol=lf
+
+# Never touch these.
+*.png binary
+*.mcap binary

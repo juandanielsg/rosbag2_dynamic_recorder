@@ -1,0 +1,26 @@
+services:
+  rosbag2-dev:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    # NOTE: no USER_UID/USER_GID override here — the base ROS image owns
+    # UID/GID 1000, so we let the Dockerfile default (1001) apply.
+    image: rosbag2-contrib:rolling
+    container_name: rosbag2-contrib
+    # Keep running so we can exec in interactively
+    stdin_open: true
+    tty: true
+    network_mode: host          # ROS 2 DDS needs the host network to talk to other nodes
+    environment:
+      - ROS_DOMAIN_ID=${ROS_DOMAIN_ID:-0}
+      - RMW_IMPLEMENTATION=${RMW_IMPLEMENTATION:-rmw_fastrtps_cpp}
+    volumes:
+      # Live-mount the workspace so host edits appear in the container
+      - ./src:${WORKSPACE:-/home/rosbag/ros2_ws}/src:rw
+      # Our own packages live outside ./src, which is the upstream rosbag2 clone and must stay clean
+      - ./spike:${WORKSPACE:-/home/rosbag/ros2_ws}/src/spike:rw
+      - ./packages:${WORKSPACE:-/home/rosbag/ros2_ws}/src/packages:rw
+      - ./build:${WORKSPACE:-/home/rosbag/ros2_ws}/build
+      - ./install:${WORKSPACE:-/home/rosbag/ros2_ws}/install
+      - ./log:${WORKSPACE:-/home/rosbag/ros2_ws}/log
+    working_dir: ${WORKSPACE:-/home/rosbag/ros2_ws}

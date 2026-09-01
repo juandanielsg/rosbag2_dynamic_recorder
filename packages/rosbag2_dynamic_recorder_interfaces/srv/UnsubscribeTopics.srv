@@ -1,0 +1,18 @@
+# Fully qualified topic names to unsubscribe the recorder from.
+# Messages already written for these topics are kept; the bag simply stops gaining new ones,
+# leaving a sparse channel.
+string[] topics
+
+---
+
+# Return code. 0 on success; 1 when none of the requested topics got unsubscribed, or on error.
+int32 return_code
+
+# Error string. Empty if no error occurred.
+string error_string
+
+# Topics that are no longer subscribed after handling the request.
+string[] unsubscribed_topics
+
+# Topics that could not be unsubscribed because they were not subscribed or the name was invalid.
+string[] not_subscribed_topics
