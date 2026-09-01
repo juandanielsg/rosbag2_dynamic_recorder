@@ -38,6 +38,7 @@
 #include "rosbag2_interfaces/srv/split_bagfile.hpp"
 #include "rosbag2_interfaces/srv/stop.hpp"
 #include "rosbag2_interfaces/srv/toggle_paused.hpp"
+#include "rosbag2_dynamic_recorder_interfaces/msg/recorder_status.hpp"
 #include "rosbag2_dynamic_recorder_interfaces/msg/subscription_change_event.hpp"
 #include "rosbag2_dynamic_recorder_interfaces/srv/get_status.hpp"
 #include "rosbag2_dynamic_recorder_interfaces/srv/set_topics.hpp"
@@ -97,6 +98,7 @@ private:
   using Stop = rosbag2_interfaces::srv::Stop;
   using SubscriptionChangeEvent =
     rosbag2_dynamic_recorder_interfaces::msg::SubscriptionChangeEvent;
+  using RecorderStatus = rosbag2_dynamic_recorder_interfaces::msg::RecorderStatus;
   using WriteSplitEvent = rosbag2_interfaces::msg::WriteSplitEvent;
   using MessagesLostEvent = rosbag2_interfaces::msg::MessagesLostEvent;
 
@@ -159,6 +161,13 @@ private:
   /// cannot be read, since a status call must not fail just because of a stat error.
   uint64_t bag_size_bytes() const;
 
+  /// Single source of truth for both ~/status and ~/get_status, so the two cannot drift.
+  RecorderStatus build_status() const;
+
+  /// Publish current state. Called on a timer and after every mutating operation, so a UI sees
+  /// a change immediately rather than up to a tick later.
+  void publish_status();
+
   /// Publish a subscription change on ~/events/subscription_change and, unless disabled, write it
   /// into the bag so the resulting sparse channel explains itself.
   void emit_subscription_change(
@@ -202,6 +211,8 @@ private:
   rclcpp::Publisher<SubscriptionChangeEvent>::SharedPtr pub_subscription_change_;
   rclcpp::Publisher<WriteSplitEvent>::SharedPtr pub_write_split_;
   rclcpp::Publisher<MessagesLostEvent>::SharedPtr pub_messages_lost_;
+  rclcpp::Publisher<RecorderStatus>::SharedPtr pub_status_;
+  rclcpp::TimerBase::SharedPtr status_timer_;
 
   rclcpp::Serialization<SubscriptionChangeEvent> subscription_change_serialization_;
 

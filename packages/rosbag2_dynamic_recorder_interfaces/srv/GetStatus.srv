@@ -1,47 +1,6 @@
-# Everything a UI or CLI needs to render a status line in one round trip.
+# One-shot status, for clients that want a single request rather than a subscription.
+# A UI should prefer the ~/status topic, which carries this same message latched and on change.
 
 ---
 
-# Bag directory: the path you would hand to `ros2 bag play`.
-string uri
-
-# Storage plugin in use, e.g. "mcap".
-string storage_id
-
-# True between startup and ~/stop.
-bool recording
-
-# True while arriving messages are discarded rather than written. Subscriptions stay up.
-bool paused
-
-# True if the writer is buffering in memory and only flushes on ~/snapshot.
-bool snapshot_mode
-
-# When recording started, on the node clock.
-builtin_interfaces/Time recording_started
-
-# Seconds since recording started. Provided so a client on a different machine does not have to
-# reconcile clocks to show an elapsed time.
-float64 elapsed_seconds
-
-# Topics currently subscribed, sorted.
-string[] subscribed_topics
-
-# Messages written to the bag since startup, including the recorder's own event messages.
-uint64 messages_written
-
-# Messages known to have been dropped: transport-side losses reported by subscriptions plus
-# storage- and cache-side losses reported by the writer.
-uint64 messages_lost
-
-# Number of times the bag file has rolled over, whether by ~/split_bagfile or by a size or
-# duration limit.
-uint64 bag_splits
-
-# Total size on disk of the bag directory in bytes. 0 if it could not be determined.
-#
-# NOTE: this is bytes *flushed to disk*, not bytes captured. The writer buffers in a cache
-# (max_cache_size, 100 MB by default) and only writes chunks out as they fill, so early in a
-# recording this reads 0 even though messages are being captured normally. Use messages_written
-# to answer "is it recording?"; use this only for disk-usage accounting.
-uint64 bag_size_bytes
+RecorderStatus status

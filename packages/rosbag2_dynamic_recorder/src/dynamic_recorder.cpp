@@ -55,6 +55,7 @@ DynamicRecorder::DynamicRecorder(const rclcpp::NodeOptions & options)
   const auto max_cache_size = declare_parameter<int64_t>("max_cache_size", 100 * 1024 * 1024);
   const auto messages_lost_report_period_s =
     declare_parameter<double>("messages_lost_report_period", 5.0);
+  const auto status_publish_period_s = declare_parameter<double>("status_publish_period", 1.0);
   paused_ = declare_parameter<bool>("start_paused", false);
   const auto initial_topics = declare_parameter<std::vector<std::string>>(
     "topics", std::vector<std::string>{});
@@ -167,6 +168,17 @@ DynamicRecorder::DynamicRecorder(const rclcpp::NodeOptions & options)
   pub_write_split_ = create_publisher<WriteSplitEvent>("~/events/write_split", event_qos);
   pub_messages_lost_ = create_publisher<MessagesLostEvent>("~/events/messages_lost", rclcpp::QoS(10));
 
+  // Latched depth 1: a panel opened mid-recording gets current state immediately instead of
+  // waiting up to a full tick for the first publication.
+  pub_status_ = create_publisher<RecorderStatus>(
+    "~/status", rclcpp::QoS(1).transient_local());
+  if (status_publish_period_s > 0.0) {
+    status_timer_ = create_wall_timer(
+      std::chrono::duration<double>(status_publish_period_s),
+      [this]() {publish_status();},
+      service_callback_group_);
+  }
+
   if (messages_lost_report_period_s > 0.0) {
     messages_lost_timer_ = create_wall_timer(
       std::chrono::duration<double>(messages_lost_report_period_s),
@@ -225,9 +237,12 @@ void DynamicRecorder::stop()
     }
     subscriptions_.clear();
   }
-  std::lock_guard<std::mutex> lock(writer_mutex_);
-  writer_->close();
+  {
+    std::lock_guard<std::mutex> lock(writer_mutex_);
+    writer_->close();
+  }
   RCLCPP_INFO(get_logger(), "Recording stopped, bag closed.");
+  publish_status();
 }
 
 std::vector<std::string> DynamicRecorder::subscribed_topics() const
@@ -268,6 +283,30 @@ bool DynamicRecorder::subscribe_topic(
 
   const auto endpoints = get_publishers_info_by_topic(topic_name);
   const auto qos = rosbag2_storage::Rosbag2QoS::adapt_request_to_offers(topic_name, endpoints);
+
+  // Diagnostic: messages have been observed going missing from bags without the transport or the
+  // writer reporting any loss. A subscription QoS weaker than what the publisher offers would
+  // explain drops that raise no event, so record what we actually asked for versus what was
+  // offered. See notes/recording-stall.md.
+  {
+    const auto describe = [](const rclcpp::QoS & q) {
+        const auto & p = q.get_rmw_qos_profile();
+        std::string reliability = p.reliability == RMW_QOS_POLICY_RELIABILITY_RELIABLE ?
+          "reliable" : (p.reliability == RMW_QOS_POLICY_RELIABILITY_BEST_EFFORT ?
+          "best_effort" : "unknown");
+        std::string durability = p.durability == RMW_QOS_POLICY_DURABILITY_TRANSIENT_LOCAL ?
+          "transient_local" : "volatile";
+        std::string history = p.history == RMW_QOS_POLICY_HISTORY_KEEP_ALL ? "keep_all" :
+          ("keep_last(" + std::to_string(p.depth) + ")");
+        return reliability + "/" + durability + "/" + history;
+      };
+    std::string offered;
+    for (const auto & endpoint : endpoints) {
+      offered += (offered.empty() ? "" : ", ") + describe(endpoint.qos_profile());
+    }
+    RCLCPP_INFO(get_logger(), "QoS '%s': offered [%s] -> subscribing %s",
+      topic_name.c_str(), offered.c_str(), describe(qos).c_str());
+  }
 
   {
     std::lock_guard<std::mutex> lock(writer_mutex_);
@@ -433,6 +472,7 @@ void DynamicRecorder::handle_subscribe_topics(
   } else {
     response->return_code = kReturnSuccess;
   }
+  publish_status();
 }
 
 void DynamicRecorder::handle_unsubscribe_topics(
@@ -454,6 +494,7 @@ void DynamicRecorder::handle_unsubscribe_topics(
   } else {
     response->return_code = kReturnSuccess;
   }
+  publish_status();
 }
 
 void DynamicRecorder::handle_set_topics(
@@ -483,6 +524,7 @@ void DynamicRecorder::handle_set_topics(
 
   response->subscribed_topics = subscribed_topics();
   response->return_code = kReturnSuccess;
+  publish_status();
 }
 
 void DynamicRecorder::handle_get_subscribed_topics(
@@ -570,6 +612,7 @@ void DynamicRecorder::pause()
 {
   if (!paused_.exchange(true)) {
     RCLCPP_INFO(get_logger(), "Recording paused.");
+    publish_status();
   }
 }
 
@@ -577,6 +620,7 @@ void DynamicRecorder::resume()
 {
   if (paused_.exchange(false)) {
     RCLCPP_INFO(get_logger(), "Recording resumed.");
+    publish_status();
   }
 }
 
@@ -724,21 +768,35 @@ void DynamicRecorder::handle_get_status(
   const std::shared_ptr<GetStatus::Request> /*request*/,
   std::shared_ptr<GetStatus::Response> response)
 {
-  response->uri = uri_;
-  response->storage_id = storage_id_;
-  response->snapshot_mode = snapshot_mode_;
-  response->paused = paused_.load();
+  response->status = build_status();
+}
+
+DynamicRecorder::RecorderStatus DynamicRecorder::build_status() const
+{
+  RecorderStatus status;
+  status.uri = uri_;
+  status.storage_id = storage_id_;
+  status.snapshot_mode = snapshot_mode_;
+  status.paused = paused_.load();
   {
     std::lock_guard<std::mutex> lock(writer_mutex_);
-    response->recording = recording_;
+    status.recording = recording_;
   }
-  response->recording_started = recording_started_;
-  response->elapsed_seconds = (now() - recording_started_).seconds();
-  response->subscribed_topics = subscribed_topics();
-  response->messages_written = messages_written_.load(std::memory_order_relaxed);
-  response->messages_lost = total_messages_lost_.load();
-  response->bag_splits = bag_splits_.load(std::memory_order_relaxed);
-  response->bag_size_bytes = bag_size_bytes();
+  status.recording_started = recording_started_;
+  status.elapsed_seconds = (now() - recording_started_).seconds();
+  status.subscribed_topics = subscribed_topics();
+  status.messages_written = messages_written_.load(std::memory_order_relaxed);
+  status.messages_lost = total_messages_lost_.load();
+  status.bag_splits = bag_splits_.load(std::memory_order_relaxed);
+  status.bag_size_bytes = bag_size_bytes();
+  return status;
+}
+
+void DynamicRecorder::publish_status()
+{
+  if (pub_status_) {
+    pub_status_->publish(build_status());
+  }
 }
 
 }  // namespace rosbag2_dynamic_recorder
