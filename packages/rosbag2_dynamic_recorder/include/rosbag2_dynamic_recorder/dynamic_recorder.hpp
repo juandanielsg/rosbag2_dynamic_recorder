@@ -83,6 +83,10 @@ public:
   /// Total messages dropped by the transport layer since startup, across all topics.
   uint64_t total_messages_lost() const;
 
+  /// Messages detected as missing via gaps in publisher sequence numbers. Independent of whether
+  /// the transport reported anything, so it catches loss that raises no event.
+  uint64_t total_messages_missed() const;
+
 private:
   using SubscribeTopics = rosbag2_dynamic_recorder_interfaces::srv::SubscribeTopics;
   using UnsubscribeTopics = rosbag2_dynamic_recorder_interfaces::srv::UnsubscribeTopics;
@@ -219,6 +223,20 @@ private:
   /// Checked in the write path. Atomic because it is read on every message and written from a
   /// service callback on a different thread.
   std::atomic_bool paused_{false};
+
+  /// Last publication sequence number seen, keyed topic -> publisher GID -> sequence.
+  ///
+  /// Sequence numbers are per PUBLISHER, not per topic. Keying by topic alone is wrong the moment
+  /// a topic has more than one publisher -- /tf routinely does -- because the independent counters
+  /// interleave and every alternation looks like an enormous gap. That mistake produced a reported
+  /// 201,027,600 missing messages against 12,728 written.
+  ///
+  /// Cleared per topic on unsubscribe: publishers keep counting while we are not listening, and
+  /// on re-subscribe that jump is deliberate, not loss.
+  std::unordered_map<std::string, std::unordered_map<std::string, uint64_t>> last_publication_seq_;
+  std::mutex sequence_mutex_;
+  std::atomic_uint64_t messages_missed_{0};
+  std::atomic_bool sequence_numbers_available_{false};
 
   /// Per-topic transport-layer losses accumulated since the last MessagesLostEvent.
   std::unordered_map<std::string, uint64_t> messages_lost_since_last_event_;

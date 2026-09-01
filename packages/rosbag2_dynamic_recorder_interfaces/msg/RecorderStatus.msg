@@ -41,6 +41,20 @@ uint64 messages_written
 # to a user as a guarantee that nothing was lost.
 uint64 messages_lost
 
+# Messages DETECTED as missing by watching for gaps in each publisher's sequence numbers.
+#
+# This is the honest number. Unlike messages_lost it does not depend on the transport raising an
+# event, so it catches samples the publisher overwrote in its own history before we ever saw them
+# -- which is how messages actually go missing here. Compare the two: a large messages_missed with
+# messages_lost at 0 means the recorder was blocked long enough for publisher history to overflow.
+#
+# Only meaningful when sequence_numbers_available is true.
+uint64 messages_missed
+
+# True if the middleware populates publication sequence numbers, i.e. whether messages_missed
+# means anything at all. If false, treat messages_missed as unknown rather than zero.
+bool sequence_numbers_available
+
 # Number of times the bag file has rolled over, whether by ~/split_bagfile or by a size or
 # duration limit.
 uint64 bag_splits

@@ -364,6 +364,25 @@ bool DynamicRecorder::subscribe_topic(
       send_timestamp = info.get_rmw_message_info().source_timestamp;
 #endif
 
+      // Sequence tracking happens before the pause gate on purpose: while paused we still
+      // receive messages and simply decline to write them, so they are not missing.
+      const auto & rmw_info = info.get_rmw_message_info();
+      const auto sequence = rmw_info.publication_sequence_number;
+      if (sequence != RMW_MESSAGE_INFO_SEQUENCE_NUMBER_UNSUPPORTED) {
+        sequence_numbers_available_.store(true, std::memory_order_relaxed);
+        // Per publisher, not per topic: two publishers on one topic have unrelated counters.
+        const std::string publisher_key(
+          reinterpret_cast<const char *>(rmw_info.publisher_gid.data), RMW_GID_STORAGE_SIZE);
+        std::lock_guard<std::mutex> sequence_lock(sequence_mutex_);
+        auto & per_publisher = last_publication_seq_[topic_name];
+        const auto previous = per_publisher.find(publisher_key);
+        if (previous != per_publisher.end() && sequence > previous->second + 1) {
+          messages_missed_.fetch_add(
+            sequence - previous->second - 1, std::memory_order_relaxed);
+        }
+        per_publisher[publisher_key] = sequence;
+      }
+
       // Checked before taking the lock: while paused this is the whole cost of a message.
       if (paused_.load()) {
         return;
@@ -399,6 +418,12 @@ bool DynamicRecorder::unsubscribe_topic(const std::string & topic_name)
     }
     it->second->disable_callbacks();
     subscriptions_.erase(it);
+  }
+  {
+    // Forget the sequence position: the publisher keeps counting while we are not listening, and
+    // on re-subscribe that jump is deliberate, not loss.
+    std::lock_guard<std::mutex> sequence_lock(sequence_mutex_);
+    last_publication_seq_.erase(topic_name);
   }
   RCLCPP_INFO(get_logger(), "Unsubscribed '%s'", topic_name.c_str());
 
@@ -653,6 +678,11 @@ uint64_t DynamicRecorder::total_messages_lost() const
   return total_messages_lost_.load();
 }
 
+uint64_t DynamicRecorder::total_messages_missed() const
+{
+  return messages_missed_.load(std::memory_order_relaxed);
+}
+
 void DynamicRecorder::handle_pause(
   const std::shared_ptr<Pause::Request> /*request*/, std::shared_ptr<Pause::Response> /*response*/)
 {
@@ -787,6 +817,9 @@ DynamicRecorder::RecorderStatus DynamicRecorder::build_status() const
   status.subscribed_topics = subscribed_topics();
   status.messages_written = messages_written_.load(std::memory_order_relaxed);
   status.messages_lost = total_messages_lost_.load();
+  status.messages_missed = messages_missed_.load(std::memory_order_relaxed);
+  status.sequence_numbers_available =
+    sequence_numbers_available_.load(std::memory_order_relaxed);
   status.bag_splits = bag_splits_.load(std::memory_order_relaxed);
   status.bag_size_bytes = bag_size_bytes();
   return status;
