@@ -10,6 +10,7 @@ rosidl_generate_interfaces(${PROJECT_NAME}
   "srv/SubscribeTopics.srv"
   "srv/UnsubscribeTopics.srv"
   "srv/SetTopics.srv"
+  "srv/GetStatus.srv"
   DEPENDENCIES builtin_interfaces
 )
 

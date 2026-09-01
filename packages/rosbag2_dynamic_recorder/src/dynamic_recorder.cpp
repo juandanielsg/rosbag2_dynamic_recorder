@@ -15,6 +15,7 @@
 #include "rosbag2_dynamic_recorder/dynamic_recorder.hpp"
 
 #include <algorithm>
+#include <filesystem>
 #include <memory>
 #include <string>
 #include <unordered_set>
@@ -46,6 +47,8 @@ DynamicRecorder::DynamicRecorder(const rclcpp::NodeOptions & options)
 {
   const auto uri = declare_parameter<std::string>("uri", "dynamic_bag");
   const auto storage_id = declare_parameter<std::string>("storage_id", "mcap");
+  uri_ = uri;
+  storage_id_ = storage_id;
   serialization_format_ = declare_parameter<std::string>("serialization_format", "cdr");
   record_subscription_events_ = declare_parameter<bool>("record_subscription_events", true);
   snapshot_mode_ = declare_parameter<bool>("snapshot_mode", false);
@@ -73,6 +76,7 @@ DynamicRecorder::DynamicRecorder(const rclcpp::NodeOptions & options)
   writer_ = std::make_unique<rosbag2_cpp::Writer>();
   writer_->open(storage_options, converter_options);
   recording_ = true;
+  recording_started_ = now();
   setup_writer_events();
   RCLCPP_INFO(get_logger(), "Recording to '%s' (storage_id=%s)%s%s", uri.c_str(),
     storage_id.c_str(), snapshot_mode_ ? " [snapshot mode]" : "",
@@ -147,6 +151,12 @@ DynamicRecorder::DynamicRecorder(const rclcpp::NodeOptions & options)
   srv_stop_ = create_service<Stop>(
     "~/stop",
     std::bind(&DynamicRecorder::handle_stop, this,
+      std::placeholders::_1, std::placeholders::_2),
+    qos, service_callback_group_);
+
+  srv_get_status_ = create_service<GetStatus>(
+    "~/get_status",
+    std::bind(&DynamicRecorder::handle_get_status, this,
       std::placeholders::_1, std::placeholders::_2),
     qos, service_callback_group_);
 
@@ -324,6 +334,7 @@ bool DynamicRecorder::subscribe_topic(
         return;
       }
       writer_->write(message, topic_name, topic_type, recv_timestamp, send_timestamp);
+      messages_written_.fetch_add(1, std::memory_order_relaxed);
     };
 
   auto subscription = create_generic_subscription(
@@ -490,6 +501,7 @@ void DynamicRecorder::setup_writer_events()
       event.closed_file = info.closed_file;
       event.opened_file = info.opened_file;
       event.node_name = get_fully_qualified_name();
+      bag_splits_.fetch_add(1, std::memory_order_relaxed);
       if (pub_write_split_) {
         pub_write_split_->publish(event);
       }
@@ -551,6 +563,7 @@ void DynamicRecorder::emit_subscription_change(
     static_cast<rcutils_time_point_value_t>(event.stamp.sec) * 1000000000LL + event.stamp.nanosec;
   // Deliberately not gated on paused_: a topic change while paused still has to be explicable.
   writer_->write(serialized_ptr, event_topic, event_type, stamp, stamp);
+  messages_written_.fetch_add(1, std::memory_order_relaxed);
 }
 
 void DynamicRecorder::pause()
@@ -682,6 +695,50 @@ void DynamicRecorder::handle_stop(
   current_reason_ = "service:stop";
   stop();
   response->return_code = kReturnSuccess;
+}
+
+uint64_t DynamicRecorder::bag_size_bytes() const
+{
+  namespace fs = std::filesystem;
+  std::error_code ec;
+  const fs::path dir(uri_);
+  if (!fs::is_directory(dir, ec)) {
+    return 0;
+  }
+  uint64_t total = 0;
+  for (fs::recursive_directory_iterator it(dir, ec), end; it != end; it.increment(ec)) {
+    if (ec) {
+      break;  // Report what we counted rather than failing the whole status call.
+    }
+    if (it->is_regular_file(ec)) {
+      const auto size = it->file_size(ec);
+      if (!ec) {
+        total += size;
+      }
+    }
+  }
+  return total;
+}
+
+void DynamicRecorder::handle_get_status(
+  const std::shared_ptr<GetStatus::Request> /*request*/,
+  std::shared_ptr<GetStatus::Response> response)
+{
+  response->uri = uri_;
+  response->storage_id = storage_id_;
+  response->snapshot_mode = snapshot_mode_;
+  response->paused = paused_.load();
+  {
+    std::lock_guard<std::mutex> lock(writer_mutex_);
+    response->recording = recording_;
+  }
+  response->recording_started = recording_started_;
+  response->elapsed_seconds = (now() - recording_started_).seconds();
+  response->subscribed_topics = subscribed_topics();
+  response->messages_written = messages_written_.load(std::memory_order_relaxed);
+  response->messages_lost = total_messages_lost_.load();
+  response->bag_splits = bag_splits_.load(std::memory_order_relaxed);
+  response->bag_size_bytes = bag_size_bytes();
 }
 
 }  // namespace rosbag2_dynamic_recorder

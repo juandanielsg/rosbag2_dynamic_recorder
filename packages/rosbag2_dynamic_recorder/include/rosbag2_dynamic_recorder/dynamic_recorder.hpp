@@ -39,6 +39,7 @@
 #include "rosbag2_interfaces/srv/stop.hpp"
 #include "rosbag2_interfaces/srv/toggle_paused.hpp"
 #include "rosbag2_dynamic_recorder_interfaces/msg/subscription_change_event.hpp"
+#include "rosbag2_dynamic_recorder_interfaces/srv/get_status.hpp"
 #include "rosbag2_dynamic_recorder_interfaces/srv/set_topics.hpp"
 #include "rosbag2_dynamic_recorder_interfaces/srv/subscribe_topics.hpp"
 #include "rosbag2_dynamic_recorder_interfaces/srv/unsubscribe_topics.hpp"
@@ -85,6 +86,7 @@ private:
   using SubscribeTopics = rosbag2_dynamic_recorder_interfaces::srv::SubscribeTopics;
   using UnsubscribeTopics = rosbag2_dynamic_recorder_interfaces::srv::UnsubscribeTopics;
   using SetTopics = rosbag2_dynamic_recorder_interfaces::srv::SetTopics;
+  using GetStatus = rosbag2_dynamic_recorder_interfaces::srv::GetStatus;
   using GetSubscribedTopics = rosbag2_interfaces::srv::GetSubscribedTopics;
   using Pause = rosbag2_interfaces::srv::Pause;
   using Resume = rosbag2_interfaces::srv::Resume;
@@ -149,6 +151,13 @@ private:
     std::shared_ptr<Snapshot::Response> response);
   void handle_stop(
     const std::shared_ptr<Stop::Request> request, std::shared_ptr<Stop::Response> response);
+  void handle_get_status(
+    const std::shared_ptr<GetStatus::Request> request,
+    std::shared_ptr<GetStatus::Response> response);
+
+  /// Sum of the file sizes in the bag directory. Returns 0 rather than throwing if the directory
+  /// cannot be read, since a status call must not fail just because of a stat error.
+  uint64_t bag_size_bytes() const;
 
   /// Publish a subscription change on ~/events/subscription_change and, unless disabled, write it
   /// into the bag so the resulting sparse channel explains itself.
@@ -188,6 +197,7 @@ private:
   rclcpp::Service<SplitBagfile>::SharedPtr srv_split_bagfile_;
   rclcpp::Service<Snapshot>::SharedPtr srv_snapshot_;
   rclcpp::Service<Stop>::SharedPtr srv_stop_;
+  rclcpp::Service<GetStatus>::SharedPtr srv_get_status_;
 
   rclcpp::Publisher<SubscriptionChangeEvent>::SharedPtr pub_subscription_change_;
   rclcpp::Publisher<WriteSplitEvent>::SharedPtr pub_write_split_;
@@ -213,6 +223,12 @@ private:
   std::string serialization_format_;
   bool record_subscription_events_{true};
   bool snapshot_mode_{false};
+
+  std::string uri_;
+  std::string storage_id_;
+  rclcpp::Time recording_started_;
+  std::atomic_uint64_t messages_written_{0};
+  std::atomic_uint64_t bag_splits_{0};
 };
 
 }  // namespace rosbag2_dynamic_recorder
