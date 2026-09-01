@@ -29,14 +29,41 @@ standard rosbag2 bag and the whole ecosystem keeps working. Only the *control pl
 
 ## Services
 
+Topic management:
+
 | Service | Purpose |
 |---|---|
 | `~/subscribe_topics` | Add topics. Types are discovered from the graph if not given. |
 | `~/unsubscribe_topics` | Drop topics. Recorded messages are kept. |
 | `~/set_topics` | Replace the whole set atomically. Topics in both old and new are untouched. |
-| `~/get_subscribed_topics` | Current set. Uses the stock `rosbag2_interfaces` service. |
+| `~/get_subscribed_topics` | Current set. |
 
-`return_code` is `0` on success, `1` when nothing was actioned or on error.
+Recording control. These use the stock `rosbag2_interfaces` definitions, so a client written
+against standard rosbag2 drives this node unchanged:
+
+| Service | Purpose |
+|---|---|
+| `~/pause` `~/resume` `~/toggle_paused` `~/is_paused` | Stop writing without tearing down subscriptions. |
+| `~/split_bagfile` | Close the current file and open the next. |
+| `~/snapshot` | Flush the in-memory buffer. Requires `snapshot_mode`. |
+| `~/stop` | Close the bag. |
+
+`return_code` is `0` on success, `1` when nothing was actioned or on error. The
+timestamp-scheduled forms of `resume` and `split_bagfile` are not implemented and return an
+explicit error rather than silently acting immediately.
+
+## Events
+
+| Topic | Message |
+|---|---|
+| `~/events/subscription_change` | `SubscriptionChangeEvent` — **also written into the bag** |
+| `~/events/write_split` | `WriteSplitEvent` |
+| `~/events/messages_lost` | `MessagesLostEvent` |
+
+Recording the subscription changes into the bag is the point: a channel that stops mid-bag is
+otherwise indistinguishable from a dropout, a crash, or a network fault. The event says what
+changed, when, and why — in-stream, timestamped, and surviving bag splits. Disable with
+`record_subscription_events:=false`.
 
 ```bash
 ros2 run rosbag2_dynamic_recorder dynamic_recorder --ros-args \
@@ -57,16 +84,30 @@ ros2 service call /rosbag2_dynamic_recorder/set_topics \
 | `storage_id` | `mcap` | Storage plugin. |
 | `serialization_format` | `cdr` | Message serialization format. |
 | `topics` | `[]` | Topics to subscribe at startup. |
+| `start_paused` | `false` | Start with recording paused. |
+| `snapshot_mode` | `false` | Buffer in memory, write only on `~/snapshot`. |
+| `max_cache_size` | `104857600` | Writer cache in bytes. Must be > 0 for `snapshot_mode`. |
+| `record_subscription_events` | `true` | Write subscription changes into the bag. |
+| `messages_lost_report_period` | `5.0` | Seconds between `MessagesLostEvent`. `0` disables. |
+
+There is a launch file too:
+
+```bash
+ros2 launch rosbag2_dynamic_recorder dynamic_recorder.launch.py \
+  uri:=/tmp/mybag topics:="['/scan','/odom']"
+```
 
 ## Status
 
 Working and verified end to end; not yet run on real hardware. See
 [notes/roadmap.md](notes/roadmap.md).
 
-- **M1 done** — all four services, verified by
+- **M1 done** — topic management, verified by
   [`m1_smoke_test.sh`](packages/rosbag2_dynamic_recorder/test/m1_smoke_test.sh): topics added and
   removed mid-recording land in a single MCAP with no gap on untouched topics.
-- **M2 next** — pause/resume, split, snapshot, subscription-change events, lost-message accounting.
+- **M2 done** — recording control, events and provenance, verified by
+  [`m2_smoke_test.sh`](packages/rosbag2_dynamic_recorder/test/m2_smoke_test.sh).
+- **M3 next** — named topic-set profiles switched atomically on mode change.
 
 ## Layout
 

@@ -3,11 +3,14 @@ project(rosbag2_dynamic_recorder_interfaces)
 
 find_package(ament_cmake REQUIRED)
 find_package(rosidl_default_generators REQUIRED)
+find_package(builtin_interfaces REQUIRED)
 
 rosidl_generate_interfaces(${PROJECT_NAME}
+  "msg/SubscriptionChangeEvent.msg"
   "srv/SubscribeTopics.srv"
   "srv/UnsubscribeTopics.srv"
   "srv/SetTopics.srv"
+  DEPENDENCIES builtin_interfaces
 )
 
 ament_export_dependencies(rosidl_default_runtime)

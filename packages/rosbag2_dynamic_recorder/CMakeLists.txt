@@ -56,6 +56,10 @@ install(
   TARGETS dynamic_recorder
   DESTINATION lib/${PROJECT_NAME}
 )
+install(
+  DIRECTORY launch
+  DESTINATION share/${PROJECT_NAME}
+)
 
 ament_export_targets(${PROJECT_NAME} HAS_LIBRARY_TARGET)
 ament_export_dependencies(

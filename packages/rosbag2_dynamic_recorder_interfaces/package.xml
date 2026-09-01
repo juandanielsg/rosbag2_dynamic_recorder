@@ -4,8 +4,10 @@
   <name>rosbag2_dynamic_recorder_interfaces</name>
   <version>0.1.0</version>
   <description>
-    Service definitions for runtime topic management on a rosbag2 recorder: subscribe, unsubscribe
-    and atomically replace the recorded topic set.
+    Interface definitions for runtime topic management on a rosbag2 recorder: services to
+    subscribe, unsubscribe and atomically replace the recorded topic set, plus a
+    SubscriptionChangeEvent recorded into the bag so that a topic which stops mid-bag is
+    distinguishable from lost data.
 
     Field naming and the return_code convention deliberately follow the style of the existing
     rosbag2_interfaces services, so these read as a natural extension of them. Reading the current
@@ -16,6 +18,8 @@
 
   <buildtool_depend>ament_cmake</buildtool_depend>
   <buildtool_depend>rosidl_default_generators</buildtool_depend>
+
+  <depend>builtin_interfaces</depend>
 
   <exec_depend>rosidl_default_runtime</exec_depend>
 

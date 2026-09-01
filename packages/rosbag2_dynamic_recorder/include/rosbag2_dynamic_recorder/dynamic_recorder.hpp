@@ -15,6 +15,8 @@
 #ifndef ROSBAG2_DYNAMIC_RECORDER__DYNAMIC_RECORDER_HPP_
 #define ROSBAG2_DYNAMIC_RECORDER__DYNAMIC_RECORDER_HPP_
 
+#include <atomic>
+#include <cstdint>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -23,9 +25,20 @@
 #include <vector>
 
 #include "rclcpp/rclcpp.hpp"
+#include "rclcpp/serialization.hpp"
 #include "rosbag2_cpp/writer.hpp"
 
+#include "rosbag2_interfaces/msg/messages_lost_event.hpp"
+#include "rosbag2_interfaces/msg/write_split_event.hpp"
 #include "rosbag2_interfaces/srv/get_subscribed_topics.hpp"
+#include "rosbag2_interfaces/srv/is_paused.hpp"
+#include "rosbag2_interfaces/srv/pause.hpp"
+#include "rosbag2_interfaces/srv/resume.hpp"
+#include "rosbag2_interfaces/srv/snapshot.hpp"
+#include "rosbag2_interfaces/srv/split_bagfile.hpp"
+#include "rosbag2_interfaces/srv/stop.hpp"
+#include "rosbag2_interfaces/srv/toggle_paused.hpp"
+#include "rosbag2_dynamic_recorder_interfaces/msg/subscription_change_event.hpp"
 #include "rosbag2_dynamic_recorder_interfaces/srv/set_topics.hpp"
 #include "rosbag2_dynamic_recorder_interfaces/srv/subscribe_topics.hpp"
 #include "rosbag2_dynamic_recorder_interfaces/srv/unsubscribe_topics.hpp"
@@ -53,11 +66,37 @@ public:
   /// Topics currently subscribed, sorted.
   std::vector<std::string> subscribed_topics() const;
 
+  /// Pause recording. Subscriptions stay up and messages keep arriving; they are discarded
+  /// rather than written, so the bag shows a gap on every topic and no channel is torn down.
+  void pause();
+  void resume();
+  bool is_paused() const;
+
+  /// Close the current bag file and open the next one. Recording continues throughout.
+  bool split_bagfile();
+
+  /// Flush the in-memory circular buffer to disk. Requires snapshot_mode.
+  bool take_snapshot();
+
+  /// Total messages dropped by the transport layer since startup, across all topics.
+  uint64_t total_messages_lost() const;
+
 private:
   using SubscribeTopics = rosbag2_dynamic_recorder_interfaces::srv::SubscribeTopics;
   using UnsubscribeTopics = rosbag2_dynamic_recorder_interfaces::srv::UnsubscribeTopics;
   using SetTopics = rosbag2_dynamic_recorder_interfaces::srv::SetTopics;
   using GetSubscribedTopics = rosbag2_interfaces::srv::GetSubscribedTopics;
+  using Pause = rosbag2_interfaces::srv::Pause;
+  using Resume = rosbag2_interfaces::srv::Resume;
+  using TogglePaused = rosbag2_interfaces::srv::TogglePaused;
+  using IsPaused = rosbag2_interfaces::srv::IsPaused;
+  using SplitBagfile = rosbag2_interfaces::srv::SplitBagfile;
+  using Snapshot = rosbag2_interfaces::srv::Snapshot;
+  using Stop = rosbag2_interfaces::srv::Stop;
+  using SubscriptionChangeEvent =
+    rosbag2_dynamic_recorder_interfaces::msg::SubscriptionChangeEvent;
+  using WriteSplitEvent = rosbag2_interfaces::msg::WriteSplitEvent;
+  using MessagesLostEvent = rosbag2_interfaces::msg::MessagesLostEvent;
 
   /// Resolve a topic's type from the ROS graph.
   /// \return the type, or nullopt if the topic is absent or offers more than one type.
@@ -92,6 +131,33 @@ private:
   void handle_get_subscribed_topics(
     const std::shared_ptr<GetSubscribedTopics::Request> request,
     std::shared_ptr<GetSubscribedTopics::Response> response);
+  void handle_pause(
+    const std::shared_ptr<Pause::Request> request, std::shared_ptr<Pause::Response> response);
+  void handle_resume(
+    const std::shared_ptr<Resume::Request> request, std::shared_ptr<Resume::Response> response);
+  void handle_toggle_paused(
+    const std::shared_ptr<TogglePaused::Request> request,
+    std::shared_ptr<TogglePaused::Response> response);
+  void handle_is_paused(
+    const std::shared_ptr<IsPaused::Request> request,
+    std::shared_ptr<IsPaused::Response> response);
+  void handle_split_bagfile(
+    const std::shared_ptr<SplitBagfile::Request> request,
+    std::shared_ptr<SplitBagfile::Response> response);
+  void handle_snapshot(
+    const std::shared_ptr<Snapshot::Request> request,
+    std::shared_ptr<Snapshot::Response> response);
+  void handle_stop(
+    const std::shared_ptr<Stop::Request> request, std::shared_ptr<Stop::Response> response);
+
+  /// Publish a subscription change on ~/events/subscription_change and, unless disabled, write it
+  /// into the bag so the resulting sparse channel explains itself.
+  void emit_subscription_change(
+    const std::string & topic_name, const std::string & topic_type, uint8_t action,
+    const std::string & reason);
+
+  /// Register write-split and messages-lost callbacks on the writer.
+  void setup_writer_events();
 
   std::unique_ptr<rosbag2_cpp::Writer> writer_;
   /// Guards writer_ access and recording_. rosbag2_cpp::Writer has its own internal lock, but we
@@ -115,8 +181,38 @@ private:
   rclcpp::Service<UnsubscribeTopics>::SharedPtr srv_unsubscribe_topics_;
   rclcpp::Service<SetTopics>::SharedPtr srv_set_topics_;
   rclcpp::Service<GetSubscribedTopics>::SharedPtr srv_get_subscribed_topics_;
+  rclcpp::Service<Pause>::SharedPtr srv_pause_;
+  rclcpp::Service<Resume>::SharedPtr srv_resume_;
+  rclcpp::Service<TogglePaused>::SharedPtr srv_toggle_paused_;
+  rclcpp::Service<IsPaused>::SharedPtr srv_is_paused_;
+  rclcpp::Service<SplitBagfile>::SharedPtr srv_split_bagfile_;
+  rclcpp::Service<Snapshot>::SharedPtr srv_snapshot_;
+  rclcpp::Service<Stop>::SharedPtr srv_stop_;
+
+  rclcpp::Publisher<SubscriptionChangeEvent>::SharedPtr pub_subscription_change_;
+  rclcpp::Publisher<WriteSplitEvent>::SharedPtr pub_write_split_;
+  rclcpp::Publisher<MessagesLostEvent>::SharedPtr pub_messages_lost_;
+
+  rclcpp::Serialization<SubscriptionChangeEvent> subscription_change_serialization_;
+
+  /// Checked in the write path. Atomic because it is read on every message and written from a
+  /// service callback on a different thread.
+  std::atomic_bool paused_{false};
+
+  /// Per-topic transport-layer losses accumulated since the last MessagesLostEvent.
+  std::unordered_map<std::string, uint64_t> messages_lost_since_last_event_;
+  std::atomic_uint64_t total_messages_lost_{0};
+  std::mutex messages_lost_mutex_;
+  rclcpp::TimerBase::SharedPtr messages_lost_timer_;
+
+  /// Reason stamped onto the next SubscriptionChangeEvent. Safe as shared state because every
+  /// service handler runs in service_callback_group_, which is MutuallyExclusive: only one
+  /// topic-changing operation is ever in flight.
+  std::string current_reason_{"startup"};
 
   std::string serialization_format_;
+  bool record_subscription_events_{true};
+  bool snapshot_mode_{false};
 };
 
 }  // namespace rosbag2_dynamic_recorder
