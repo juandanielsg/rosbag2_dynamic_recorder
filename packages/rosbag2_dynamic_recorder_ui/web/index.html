@@ -56,6 +56,9 @@
   .name { font-family: ui-monospace, "Cascadia Code", Consolas, monospace; font-size: 13px; }
   .tag { margin-left: auto; font-size: 11px; color: var(--muted); }
 
+  .profiles { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 10px; }
+  button.active { background: var(--ok); border-color: var(--ok); color: #fff; }
+
   .apply-row { display: flex; align-items: center; gap: 12px; margin-top: 14px; }
   .pending { color: var(--muted); font-size: 13px; }
 
@@ -101,6 +104,12 @@
       <button id="btn-snapshot">Save snapshot</button>
       <button id="btn-stop">Stop recording</button>
     </div>
+  </div>
+
+  <div class="card" id="profiles-card" hidden>
+    <h2>Profiles</h2>
+    <div class="profiles" id="profiles"></div>
+    <div class="pending" id="profile-note"></div>
   </div>
 
   <div class="card">
@@ -250,6 +259,29 @@ function renderPending(recorded) {
     " — topics you did not change keep recording without a gap";
 }
 
+function renderProfiles(s) {
+  const list = s.profiles || [];
+  $("profiles-card").hidden = list.length === 0;
+  if (!list.length) return;
+
+  $("profiles").innerHTML = list.map((p) => {
+    const on = p.name === s.active_profile;
+    return `<button class="${on ? "active" : ""}" data-profile="${p.name}"
+      title="${p.topics.join("
+")}" ${on || !s.recording ? "disabled" : ""}>${p.name}</button>`;
+  }).join("");
+
+  for (const btn of $("profiles").querySelectorAll("button[data-profile]")) {
+    btn.onclick = async () => {
+      const out = await act("set_profile", { name: btn.dataset.profile });
+      if (out.ok) { pending = null; toast(`Switched to ${btn.dataset.profile}.`); }
+    };
+  }
+  $("profile-note").textContent = s.active_profile
+    ? `Recording the "${s.active_profile}" profile.`
+    : "The current selection does not match a profile.";
+}
+
 function renderEvents(s) {
   if (!s.events.length) { $("events").innerHTML = '<li class="empty">Nothing yet.</li>'; return; }
   $("events").innerHTML = s.events.map((e) => `
@@ -307,10 +339,12 @@ function render(s) {
     $("stats").innerHTML = "";
     $("topics").innerHTML = '<li class="empty">Waiting for the recorder…</li>';
     $("detail").innerHTML = "";
+    $("profiles-card").hidden = true;
     return;
   }
   $("btn-apply").title = s.recording ? "" : "Start recording before changing topics";
   renderStats(s);
+  renderProfiles(s);
   renderTopics(s);
   renderEvents(s);
   renderDetail(s);

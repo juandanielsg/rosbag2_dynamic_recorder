@@ -36,6 +36,8 @@ from rclpy.qos import DurabilityPolicy, HistoryPolicy, QoSProfile, ReliabilityPo
 
 from rosbag2_dynamic_recorder_interfaces.msg import RecorderStatus, SubscriptionChangeEvent
 from rosbag2_dynamic_recorder_interfaces.srv import (
+    GetProfiles,
+    SetProfile,
     SetTopics,
     SubscribeTopics,
     UnsubscribeTopics,
@@ -55,6 +57,7 @@ ACTION_SERVICES = {
     "snapshot": (Snapshot, "snapshot"),
     "stop": (Stop, "stop"),
     "record": (Record, "record"),
+    "set_profile": (SetProfile, "set_profile"),
 }
 
 
@@ -87,6 +90,7 @@ def build_state(status, age, recorder, available_topics, events):
         "snapshot_mode": bool(status.snapshot_mode),
         "elapsed_seconds": status.elapsed_seconds,
         "subscribed_topics": list(status.subscribed_topics),
+        "active_profile": status.active_profile,
         "available_topics": available_topics,
         "messages_written": status.messages_written,
         # None means "cannot tell". The page renders that as unknown rather than as zero.
@@ -145,6 +149,14 @@ class RecorderUi(Node):
             for name, (srv, path) in ACTION_SERVICES.items()
         }
 
+        self._profiles = []
+        self._profiles_client = self.create_client(
+            GetProfiles, f"{self.recorder}/get_profiles"
+        )
+        # Profiles are fixed at recorder startup, so fetch once in the background rather than on
+        # every page poll.
+        threading.Thread(target=self._fetch_profiles, daemon=True).start()
+
         web_root = Path(get_package_share_directory("rosbag2_dynamic_recorder_ui")) / "web"
         server = ThreadingHTTPServer(
             (self.bind, self.port), partial(_Handler, self, web_root)
@@ -155,6 +167,22 @@ class RecorderUi(Node):
         self.get_logger().info(
             f"UI on http://localhost:{self.port}  (controlling {self.recorder})"
         )
+
+    def _fetch_profiles(self):
+        if not self._profiles_client.wait_for_service(timeout_sec=30.0):
+            self.get_logger().info("No ~/get_profiles service; profiles will not be offered")
+            return
+        future = self._profiles_client.call_async(GetProfiles.Request())
+        deadline = time.monotonic() + 15.0
+        while not future.done() and time.monotonic() < deadline:
+            time.sleep(0.05)
+        if not future.done():
+            return
+        with self._lock:
+            self._profiles = [
+                {"name": p.name, "topics": list(p.topics)} for p in future.result().profiles
+            ]
+        self.get_logger().info(f"Offering {len(self._profiles)} recording profile(s)")
 
     # --- ROS side ---------------------------------------------------------
     def _on_status(self, msg):
@@ -187,7 +215,11 @@ class RecorderUi(Node):
             status = self._status
             age = time.monotonic() - self._status_stamp if status else None
             events = list(reversed(self._events[-15:]))
-        return build_state(status, age, self.recorder, self.available_topics(), events)
+        with self._lock:
+            profiles = list(self._profiles)
+        state = build_state(status, age, self.recorder, self.available_topics(), events)
+        state["profiles"] = profiles
+        return state
 
     def call(self, action, payload):
         client = self._service_clients.get(action)
@@ -199,6 +231,8 @@ class RecorderUi(Node):
         request = ACTION_SERVICES[action][0].Request()
         if hasattr(request, "topics"):
             request.topics = list(payload.get("topics", []))
+        if hasattr(request, "name"):
+            request.name = str(payload.get("name", ""))
 
         future = client.call_async(request)
         deadline = time.monotonic() + 10.0

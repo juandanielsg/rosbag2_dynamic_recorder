@@ -1,0 +1,9 @@
+# List the configured profiles, so a UI can offer them without knowing the parameter layout.
+---
+Profile[] profiles
+
+# Name of the profile whose topic list exactly matches what is being recorded right now.
+# Empty when the current selection matches no profile, which is the normal state after any
+# manual topic change. Derived from the live topic set rather than remembered, so it cannot
+# go stale and claim a profile that is no longer in effect.
+string active_profile

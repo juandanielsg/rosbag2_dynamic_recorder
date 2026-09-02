@@ -42,7 +42,9 @@ from rclpy.qos import QoSProfile, ReliabilityPolicy
 from std_msgs.msg import String
 
 from rosbag2_dynamic_recorder_interfaces.srv import (
+    GetProfiles,
     GetStatus,
+    SetProfile,
     SetTopics,
     SubscribeTopics,
     UnsubscribeTopics,
@@ -93,21 +95,23 @@ class Harness(Node):
         for pub in self._pubs:
             pub.publish(String(data=f"m{self._seq}"))
 
-    def client(self, srv_type, name):
-        key = (srv_type, name)
+    def client(self, srv_type, service):
+        key = (srv_type, service)
         if key not in self._service_clients:
-            self._service_clients[key] = self.create_client(srv_type, f"{NODE}/{name}")
+            self._service_clients[key] = self.create_client(srv_type, f"{NODE}/{service}")
         return self._service_clients[key]
 
-    def call(self, srv_type, name, timeout=20.0, **fields):
-        client = self.client(srv_type, name)
-        assert client.wait_for_service(timeout_sec=timeout), f"service {name} never appeared"
+    # `service`, not `name`: request fields are passed as **fields, and SetProfile has a field
+    # called `name`, which would collide with a parameter of that name.
+    def call(self, srv_type, service, timeout=20.0, **fields):
+        client = self.client(srv_type, service)
+        assert client.wait_for_service(timeout_sec=timeout), f"service {service} never appeared"
         request = srv_type.Request()
         for key, value in fields.items():
             setattr(request, key, value)
         future = client.call_async(request)
         rclpy.spin_until_future_complete(self, future, timeout_sec=timeout)
-        assert future.done(), f"service {name} timed out"
+        assert future.done(), f"service {service} timed out"
         return future.result()
 
     def spin_for(self, seconds):
@@ -119,9 +123,8 @@ class Harness(Node):
         return self.call(GetStatus, "get_status").status
 
 
-@pytest.fixture()
-def recorder():
-    """A freshly started recorder plus a harness publishing on the test topics."""
+def _start_recorder(extra_args=()):
+    """Start a recorder process and a harness. Returns (harness, bag, cleanup)."""
     env = dict(os.environ, ROS_DOMAIN_ID=TEST_DOMAIN_ID)
     tmp = tempfile.mkdtemp(prefix="rdr_test_")
     bag = os.path.join(tmp, "bag")
@@ -131,19 +134,15 @@ def recorder():
     )
     assert os.path.exists(exe), f"recorder executable not found at {exe}"
     proc = subprocess.Popen(
-        [exe, "--ros-args", "-p", f"uri:={bag}", "-p", "status_publish_period:=0.2"],
+        [exe, "--ros-args", "-p", f"uri:={bag}", "-p", "status_publish_period:=0.2",
+         *extra_args],
         env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
     )
 
     rclpy.init(args=None)
     harness = Harness()
-    try:
-        # Let the recorder come up and the harness's publishers reach the graph.
-        harness.spin_for(4.0)
-        if proc.poll() is not None:
-            raise AssertionError("recorder exited early:\n" + proc.stdout.read())
-        yield harness, bag
-    finally:
+
+    def cleanup():
         harness.destroy_node()
         rclpy.shutdown()
         proc.terminate()
@@ -152,6 +151,40 @@ def recorder():
         except subprocess.TimeoutExpired:
             proc.kill()
         shutil.rmtree(tmp, ignore_errors=True)
+
+    try:
+        # Let the recorder come up and the harness's publishers reach the graph.
+        harness.spin_for(4.0)
+        if proc.poll() is not None:
+            raise AssertionError("recorder exited early:\n" + proc.stdout.read())
+    except BaseException:
+        cleanup()
+        raise
+    return harness, bag, cleanup
+
+
+@pytest.fixture()
+def recorder():
+    """A freshly started recorder plus a harness publishing on the test topics."""
+    harness, bag, cleanup = _start_recorder()
+    try:
+        yield harness, bag
+    finally:
+        cleanup()
+
+
+@pytest.fixture()
+def profiled_recorder():
+    """A recorder configured with two deliberately overlapping profiles."""
+    harness, bag, cleanup = _start_recorder((
+        "-p", "profile_names:=[small,large]",
+        "-p", f"profiles.small:=[{TOPICS[0]}]",
+        "-p", f"profiles.large:=[{TOPICS[0]},{TOPICS[1]}]",
+    ))
+    try:
+        yield harness, bag
+    finally:
+        cleanup()
 
 
 def test_subscribe_then_status_reports_it(recorder):
@@ -368,3 +401,69 @@ def test_events_are_recorded_for_the_initial_subscription_too(recorder):
     first = [e for e in events if e.topic_name == TOPICS[0] and e.action == SUBSCRIBED]
     assert first, "the initial subscription was not explained"
     assert first[0].reason, "every event should carry a reason"
+
+
+def test_profiles_are_offered_as_configured(profiled_recorder):
+    harness, _ = profiled_recorder
+    response = harness.call(GetProfiles, "get_profiles")
+    names = [p.name for p in response.profiles]
+    assert names == ["small", "large"], "declaration order should be preserved for a UI to list"
+
+
+def test_switching_profiles_does_not_touch_shared_topics(profiled_recorder):
+    """The fleet case: small and large share a topic, and switching must not interrupt it."""
+    harness, _ = profiled_recorder
+    harness.call(SetProfile, "set_profile", name="small")
+    response = harness.call(SetProfile, "set_profile", name="large")
+
+    assert response.return_code == 0, response.error_string
+    assert TOPICS[0] not in response.unsubscribed_topics, (
+        "the topic shared by both profiles was torn down"
+    )
+    assert set(response.subscribed_topics) == {TOPICS[0], TOPICS[1]}
+
+
+def test_active_profile_is_derived_not_remembered(profiled_recorder):
+    """A remembered name would still read 'large' after someone changed a topic by hand, which
+    would be a lie in the status."""
+    harness, _ = profiled_recorder
+    harness.call(SetProfile, "set_profile", name="large")
+    assert harness.status().active_profile == "large"
+
+    # Add a topic no profile lists, so the selection matches nothing.
+    harness.call(SubscribeTopics, "subscribe_topics", topics=[TOPICS[2]])
+    assert harness.status().active_profile == "", (
+        "the selection no longer matches any profile, so none is active"
+    )
+
+    # Returning to exactly a profile's set makes it active again, with no set_profile call.
+    harness.call(UnsubscribeTopics, "unsubscribe_topics", topics=[TOPICS[2]])
+    assert harness.status().active_profile == "large"
+
+
+def test_active_profile_follows_the_topics_not_the_last_command(profiled_recorder):
+    """Derived means derived: dropping a topic from `large` lands exactly on `small`, and the
+    status says so even though set_profile was never called with that name.
+
+    This is the behaviour a remembered label could not produce, and it is the honest one -- the
+    recorder really is recording the small profile at that point.
+    """
+    harness, _ = profiled_recorder
+    harness.call(SetProfile, "set_profile", name="large")
+    harness.call(UnsubscribeTopics, "unsubscribe_topics", topics=[TOPICS[1]])
+    assert harness.status().active_profile == "small"
+
+
+def test_unknown_profile_says_what_is_configured(profiled_recorder):
+    harness, _ = profiled_recorder
+    response = harness.call(SetProfile, "set_profile", name="nonexistent")
+    assert response.return_code != 0
+    assert "small" in response.error_string and "large" in response.error_string, (
+        "the error should tell the caller what they could have asked for"
+    )
+
+
+def test_profiles_absent_when_none_configured(recorder):
+    harness, _ = recorder
+    assert harness.call(GetProfiles, "get_profiles").profiles == []
+    assert harness.status().active_profile == ""

@@ -39,10 +39,13 @@
 #include "rosbag2_interfaces/srv/split_bagfile.hpp"
 #include "rosbag2_interfaces/srv/stop.hpp"
 #include "rosbag2_interfaces/srv/toggle_paused.hpp"
+#include "rosbag2_dynamic_recorder_interfaces/msg/profile.hpp"
 #include "rosbag2_dynamic_recorder_interfaces/msg/recorder_status.hpp"
 #include "rosbag2_dynamic_recorder_interfaces/msg/subscription_change_event.hpp"
 #include "rosbag2_dynamic_recorder_interfaces/srv/get_status.hpp"
+#include "rosbag2_dynamic_recorder_interfaces/srv/get_profiles.hpp"
 #include "rosbag2_dynamic_recorder_interfaces/srv/get_subscribed_topics.hpp"
+#include "rosbag2_dynamic_recorder_interfaces/srv/set_profile.hpp"
 #include "rosbag2_dynamic_recorder_interfaces/srv/set_topics.hpp"
 #include "rosbag2_dynamic_recorder_interfaces/srv/subscribe_topics.hpp"
 #include "rosbag2_dynamic_recorder_interfaces/srv/unsubscribe_topics.hpp"
@@ -79,6 +82,17 @@ public:
   /// Topics currently subscribed, sorted.
   std::vector<std::string> subscribed_topics() const;
 
+  /// Apply a named profile: record exactly its topics and nothing else.
+  /// \return false if no profile of that name is configured.
+  bool set_profile(const std::string & name, std::vector<std::string> & subscribed_out,
+    std::vector<std::string> & unsubscribed_out, std::vector<std::string> & unavailable_out);
+
+  /// Name of the profile whose topic list exactly matches what is being recorded, or "".
+  ///
+  /// Derived from the live subscription set rather than remembered. A remembered name would go
+  /// stale the moment someone changed one topic by hand, and would then be a lie in the status.
+  std::string active_profile() const;
+
   /// Pause recording. Subscriptions stay up and messages keep arriving; they are discarded
   /// rather than written, so the bag shows a gap on every topic and no channel is torn down.
   void pause();
@@ -102,6 +116,9 @@ private:
   using SubscribeTopics = rosbag2_dynamic_recorder_interfaces::srv::SubscribeTopics;
   using UnsubscribeTopics = rosbag2_dynamic_recorder_interfaces::srv::UnsubscribeTopics;
   using SetTopics = rosbag2_dynamic_recorder_interfaces::srv::SetTopics;
+  using SetProfile = rosbag2_dynamic_recorder_interfaces::srv::SetProfile;
+  using GetProfiles = rosbag2_dynamic_recorder_interfaces::srv::GetProfiles;
+  using Profile = rosbag2_dynamic_recorder_interfaces::msg::Profile;
   using GetStatus = rosbag2_dynamic_recorder_interfaces::srv::GetStatus;
   using GetSubscribedTopics =
     rosbag2_dynamic_recorder_interfaces::srv::GetSubscribedTopics;
@@ -179,6 +196,12 @@ private:
   void handle_get_status(
     const std::shared_ptr<GetStatus::Request> request,
     std::shared_ptr<GetStatus::Response> response);
+  void handle_set_profile(
+    const std::shared_ptr<SetProfile::Request> request,
+    std::shared_ptr<SetProfile::Response> response);
+  void handle_get_profiles(
+    const std::shared_ptr<GetProfiles::Request> request,
+    std::shared_ptr<GetProfiles::Response> response);
 
   /// Sum of the file sizes in the bag directory. Returns 0 rather than throwing if the directory
   /// cannot be read, since a status call must not fail just because of a stat error.
@@ -231,6 +254,8 @@ private:
   rclcpp::Service<Stop>::SharedPtr srv_stop_;
   rclcpp::Service<Record>::SharedPtr srv_record_;
   rclcpp::Service<GetStatus>::SharedPtr srv_get_status_;
+  rclcpp::Service<SetProfile>::SharedPtr srv_set_profile_;
+  rclcpp::Service<GetProfiles>::SharedPtr srv_get_profiles_;
 
   rclcpp::Publisher<SubscriptionChangeEvent>::SharedPtr pub_subscription_change_;
   rclcpp::Publisher<WriteSplitEvent>::SharedPtr pub_write_split_;
@@ -280,6 +305,10 @@ private:
   rosbag2_cpp::ConverterOptions converter_options_;
   /// Topic selection at the moment of stop(), restored by record().
   std::vector<std::string> topics_at_stop_;
+
+  /// Configured profiles, in declaration order so a UI lists them predictably. Read-only after
+  /// construction, so no lock is needed.
+  std::vector<std::pair<std::string, std::vector<std::string>>> profiles_;
   rclcpp::Time recording_started_;
   std::atomic_uint64_t messages_written_{0};
   std::atomic_uint64_t bag_splits_{0};

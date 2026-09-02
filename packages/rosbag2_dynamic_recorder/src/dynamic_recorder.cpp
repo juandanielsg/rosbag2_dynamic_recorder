@@ -60,6 +60,34 @@ DynamicRecorder::DynamicRecorder(const rclcpp::NodeOptions & options)
   const auto initial_topics = declare_parameter<std::vector<std::string>>(
     "topics", std::vector<std::string>{});
 
+  // Profiles are declared as a list of names plus one string-array parameter each, rather than a
+  // nested structure, because ROS 2 parameters have no nested arrays and this keeps a plain YAML
+  // file readable:
+  //   profile_names: ["idle", "navigation"]
+  //   profiles:
+  //     idle: ["/tf", "/odom"]
+  //     navigation: ["/tf", "/odom", "/scan"]
+  const auto profile_names = declare_parameter<std::vector<std::string>>(
+    "profile_names", std::vector<std::string>{});
+  for (const auto & name : profile_names) {
+    if (name.empty()) {
+      RCLCPP_WARN(get_logger(), "Ignoring an empty profile name");
+      continue;
+    }
+    auto topics = declare_parameter<std::vector<std::string>>(
+      "profiles." + name, std::vector<std::string>{});
+    if (topics.empty()) {
+      RCLCPP_WARN(get_logger(),
+        "Profile '%s' lists no topics; applying it would record nothing", name.c_str());
+    }
+    std::sort(topics.begin(), topics.end());
+    topics.erase(std::unique(topics.begin(), topics.end()), topics.end());
+    profiles_.emplace_back(name, std::move(topics));
+  }
+  if (!profiles_.empty()) {
+    RCLCPP_INFO(get_logger(), "Loaded %zu recording profile(s)", profiles_.size());
+  }
+
   storage_options_.uri = uri;
   storage_options_.storage_id = storage_id;
   storage_options_.snapshot_mode = snapshot_mode_;
@@ -162,6 +190,18 @@ DynamicRecorder::DynamicRecorder(const rclcpp::NodeOptions & options)
   srv_get_status_ = create_service<GetStatus>(
     "~/get_status",
     std::bind(&DynamicRecorder::handle_get_status, this,
+      std::placeholders::_1, std::placeholders::_2),
+    qos, service_callback_group_);
+
+  srv_set_profile_ = create_service<SetProfile>(
+    "~/set_profile",
+    std::bind(&DynamicRecorder::handle_set_profile, this,
+      std::placeholders::_1, std::placeholders::_2),
+    qos, service_callback_group_);
+
+  srv_get_profiles_ = create_service<GetProfiles>(
+    "~/get_profiles",
+    std::bind(&DynamicRecorder::handle_get_profiles, this,
       std::placeholders::_1, std::placeholders::_2),
     qos, service_callback_group_);
 
@@ -841,6 +881,7 @@ DynamicRecorder::RecorderStatus DynamicRecorder::build_status() const
   status.recording_started = recording_started_;
   status.elapsed_seconds = (now() - recording_started_).seconds();
   status.subscribed_topics = subscribed_topics();
+  status.active_profile = active_profile();
   status.messages_written = messages_written_.load(std::memory_order_relaxed);
   status.messages_lost = total_messages_lost_.load();
   status.messages_missed = messages_missed_.load(std::memory_order_relaxed);
@@ -948,6 +989,83 @@ void DynamicRecorder::handle_record(
     return;
   }
   response->return_code = kReturnSuccess;
+}
+
+std::string DynamicRecorder::active_profile() const
+{
+  const auto current = subscribed_topics();  // already sorted
+  for (const auto & [name, topics] : profiles_) {
+    if (topics == current) {
+      return name;
+    }
+  }
+  return "";
+}
+
+bool DynamicRecorder::set_profile(
+  const std::string & name, std::vector<std::string> & subscribed_out,
+  std::vector<std::string> & unsubscribed_out, std::vector<std::string> & unavailable_out)
+{
+  const auto profile = std::find_if(
+    profiles_.begin(), profiles_.end(),
+    [&name](const auto & entry) {return entry.first == name;});
+  if (profile == profiles_.end()) {
+    return false;
+  }
+
+  // Deliberately the same path as set_topics: drop what the profile omits, then add what it
+  // wants, leaving topics common to both untouched. Switching profiles must not interrupt the
+  // topics the two modes share -- that is the entire reason profiles exist here.
+  const std::unordered_set<std::string> desired(profile->second.begin(), profile->second.end());
+  for (const auto & topic_name : subscribed_topics()) {
+    if (desired.count(topic_name) == 0 && unsubscribe_topic(topic_name)) {
+      unsubscribed_out.push_back(topic_name);
+    }
+  }
+  std::vector<std::string> subscribed;
+  subscribe_batch(profile->second, {}, subscribed, unavailable_out);
+  subscribed_out = subscribed_topics();
+  return true;
+}
+
+void DynamicRecorder::handle_set_profile(
+  const std::shared_ptr<SetProfile::Request> request,
+  std::shared_ptr<SetProfile::Response> response)
+{
+  if (!is_recording()) {
+    response->return_code = kReturnError;
+    response->error_string = "recorder is stopped; call ~/record to open a new bag first";
+    return;
+  }
+  current_reason_ = "service:set_profile:" + request->name;
+  if (!set_profile(request->name, response->subscribed_topics,
+    response->unsubscribed_topics, response->unavailable_topics))
+  {
+    response->return_code = kReturnError;
+    std::string known;
+    for (const auto & [name, _] : profiles_) {
+      known += (known.empty() ? "" : ", ") + name;
+    }
+    response->error_string = "no profile named '" + request->name + "'" +
+      (known.empty() ? "; none are configured" : "; configured: " + known);
+    return;
+  }
+  response->return_code = kReturnSuccess;
+  publish_status();
+}
+
+void DynamicRecorder::handle_get_profiles(
+  const std::shared_ptr<GetProfiles::Request> /*request*/,
+  std::shared_ptr<GetProfiles::Response> response)
+{
+  response->profiles.reserve(profiles_.size());
+  for (const auto & [name, topics] : profiles_) {
+    Profile profile;
+    profile.name = name;
+    profile.topics = topics;
+    response->profiles.push_back(profile);
+  }
+  response->active_profile = active_profile();
 }
 
 }  // namespace rosbag2_dynamic_recorder

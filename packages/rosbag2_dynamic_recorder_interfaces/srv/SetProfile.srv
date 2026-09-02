@@ -1,0 +1,22 @@
+# Apply a named profile: record exactly the topics it lists, and nothing else.
+#
+# Equivalent to calling ~/set_topics with the profile's topic list, so the same guarantee holds --
+# topics common to the old and new sets are never torn down and keep recording without a gap.
+
+# Profile name, as declared in the `profile_names` parameter.
+string name
+
+---
+
+# 0 on success; 1 if no such profile exists or the change failed.
+int32 return_code
+string error_string
+
+# Topics subscribed after applying the profile.
+string[] subscribed_topics
+
+# Topics dropped because the profile does not list them.
+string[] unsubscribed_topics
+
+# Profile topics that could not be subscribed: absent from the graph, invalid, or ambiguous type.
+string[] unavailable_topics

@@ -30,6 +30,12 @@ float64 elapsed_seconds
 # Topics currently subscribed, sorted.
 string[] subscribed_topics
 
+# Name of the profile whose topic list exactly matches subscribed_topics, or empty.
+#
+# Derived on every publication rather than remembered, so it cannot claim a profile that is no
+# longer in effect: tick one extra topic and this goes empty, which is the truth.
+string active_profile
+
 # Messages written to the bag since startup, including the recorder's own event messages.
 uint64 messages_written
 

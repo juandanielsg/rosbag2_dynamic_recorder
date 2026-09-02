@@ -1,0 +1,33 @@
+# Example recording profiles.
+#
+#   ros2 launch rosbag2_dynamic_recorder_ui recorder_with_ui.launch.py \
+#       params_file:=$(ros2 pkg prefix rosbag2_dynamic_recorder)/share/rosbag2_dynamic_recorder/config/profiles.example.yaml
+#
+# Switching between these never interrupts the topics they have in common: going from idle to
+# navigation adds /scan and leaves /tf, /odom and /imu recording without a gap. That is the point
+# of profiles here -- with stock rosbag2 the same change means stopping and restarting, which
+# punches a hole in every topic and closes the bag.
+#
+# Topic names match nav2_minimal_tb4_sim, so this file works against the TurtleBot 4 simulator as
+# written. Change them for your own robot.
+rosbag2_dynamic_recorder:
+  ros__parameters:
+    # Declaration order is preserved, and is the order the UI lists them in.
+    profile_names: ["idle", "navigation", "inspection"]
+
+    profiles:
+      # Cheap, and needed to interpret anything else. Worth having on at all times.
+      idle: ["/tf", "/tf_static", "/odom", "/imu"]
+
+      # While the robot is moving under its own control.
+      navigation: ["/tf", "/tf_static", "/odom", "/imu", "/scan"]
+
+      # Expensive. Only while actually looking at something.
+      inspection:
+        - "/tf"
+        - "/tf_static"
+        - "/odom"
+        - "/imu"
+        - "/scan"
+        - "/rgbd_camera/image"
+        - "/rgbd_camera/depth_image"

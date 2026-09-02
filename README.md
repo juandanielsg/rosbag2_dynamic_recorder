@@ -37,6 +37,8 @@ Topic management:
 | `~/unsubscribe_topics` | Drop topics. Recorded messages are kept. |
 | `~/set_topics` | Replace the whole set atomically. Topics in both old and new are untouched. |
 | `~/get_subscribed_topics` | Current set. |
+| `~/set_profile` | Apply a named topic set. Same guarantee as `set_topics`. |
+| `~/get_profiles` | List the configured profiles. |
 
 Recording control. These use the stock `rosbag2_interfaces` definitions, so a client written
 against standard rosbag2 drives this node unchanged:
@@ -62,6 +64,34 @@ gets the next free suffix — `mybag`, then `mybag(1)`.
 elapsed seconds, the subscribed topics, messages written, messages lost, split count and bag size
 on disk. Note that `bag_size_bytes` counts bytes *flushed*, not captured: the writer caches, so it
 reads 0 early in a recording. Use `messages_written` to answer "is it recording?".
+
+## Profiles
+
+A named topic set, switched in one call. The fleet case this exists for: a supervisor changes the
+robot's operating mode and the recorded topic set follows, **without interrupting the topics the
+two modes share**.
+
+```yaml
+rosbag2_dynamic_recorder:
+  ros__parameters:
+    profile_names: ["idle", "navigation", "inspection"]
+    profiles:
+      idle: ["/tf", "/odom", "/imu"]
+      navigation: ["/tf", "/odom", "/imu", "/scan"]
+```
+
+```bash
+ros2 launch rosbag2_dynamic_recorder_ui recorder_with_ui.launch.py   uri:=/tmp/mybag params_file:=profiles.yaml
+```
+
+In the UI they appear as buttons; the active one is highlighted. A worked example ships at
+`rosbag2_dynamic_recorder/config/profiles.example.yaml`, using the TurtleBot 4 simulator's topics.
+
+`active_profile` in the status is **derived from the live topic set, not remembered**. Tick one
+extra topic and it goes empty, because no profile is in effect any more. Drop a topic and land
+exactly on another profile's set and it reports that one — the recorder really is recording that
+profile, whatever command got it there. A remembered label would keep claiming a profile that had
+stopped being true.
 
 ## Events
 
