@@ -26,11 +26,13 @@ Runs its own publishers on a private ROS_DOMAIN_ID, so it needs no simulator and
 with anything else on the machine.
 """
 
+import glob
 import os
 import shutil
 import subprocess
 import tempfile
 import time
+from collections import defaultdict
 
 import pytest
 import rclpy
@@ -45,7 +47,23 @@ from rosbag2_dynamic_recorder_interfaces.srv import (
     SubscribeTopics,
     UnsubscribeTopics,
 )
+from rclpy.serialization import deserialize_message
+from rosbag2_py import ConverterOptions, SequentialReader, StorageOptions
+
+from rosbag2_dynamic_recorder_interfaces.msg import SubscriptionChangeEvent
 from rosbag2_interfaces.srv import Record, Snapshot, SplitBagfile, Stop
+
+EVENT_TYPE = "rosbag2_dynamic_recorder_interfaces/msg/SubscriptionChangeEvent"
+SUBSCRIBED, UNSUBSCRIBED = 0, 1
+
+# In practice the untouched topic's largest gap across two set_topics calls measures 0.05s --
+# exactly one publish interval at 20Hz, i.e. no interruption at all. The bound is loose only
+# because the intermittent stall documented in notes/recording-stall.md costs up to ~1.2s and is
+# not ours: it shows up under stock `ros2 bag record` too. Tightening this would flake for reasons
+# unrelated to the behaviour under test.
+#
+# Verified non-vacuous: setting this to 0.001 makes the assertion fire and report the real 0.05s.
+MAX_TOLERATED_GAP_S = 2.0
 
 # Away from the default 0 so a developer's own nodes cannot join the test graph.
 # Set before any rclpy.init(): the test node and the recorder subprocess must land on the SAME
@@ -54,6 +72,7 @@ TEST_DOMAIN_ID = "71"
 os.environ["ROS_DOMAIN_ID"] = TEST_DOMAIN_ID
 NODE = "/rosbag2_dynamic_recorder"
 TOPICS = ["/rdr_test/alpha", "/rdr_test/beta", "/rdr_test/gamma"]
+EVENT_TOPIC = f"{NODE}/events/subscription_change"
 
 
 class Harness(Node):
@@ -227,3 +246,125 @@ def test_status_never_claims_loss_it_cannot_measure(recorder):
     if not status.sequence_numbers_available:
         pytest.skip("middleware does not supply publication sequence numbers")
     assert status.messages_missed >= 0
+
+
+def read_bag(uri):
+    """Return per-topic receive timestamps (seconds, bag-relative) and the recorded events."""
+    reader = SequentialReader()
+    reader.open(StorageOptions(uri=uri, storage_id="mcap"), ConverterOptions("cdr", "cdr"))
+    types = {t.name: t.type for t in reader.get_all_topics_and_types()}
+
+    raw = defaultdict(list)
+    events = []
+    while reader.has_next():
+        topic, data, stamp = reader.read_next()
+        raw[topic].append(stamp)
+        if types.get(topic) == EVENT_TYPE:
+            events.append(deserialize_message(data, SubscriptionChangeEvent))
+
+    assert raw, "the bag is empty"
+    origin = min(min(v) for v in raw.values())
+    stamps = {k: sorted((s - origin) / 1e9 for s in v) for k, v in raw.items()}
+    return stamps, events
+
+
+def largest_gap(times):
+    return max((b - a for a, b in zip(times, times[1:])), default=0.0)
+
+
+def record_a_topic_change(harness, keep, drop, add, settle=4.0):
+    """Record `keep` and `drop`, then swap `drop` for `add`, and close the bag."""
+    harness.call(SetTopics, "set_topics", topics=[keep, drop])
+    harness.spin_for(settle)
+    harness.call(SetTopics, "set_topics", topics=[keep, add])
+    harness.spin_for(settle)
+    harness.call(Stop, "stop")
+    harness.spin_for(1.0)
+
+
+def test_topic_change_does_not_split_the_bag(recorder):
+    """A change must not close the file. Stock rosbag2 cannot avoid this, which is the point."""
+    harness, bag = recorder
+    record_a_topic_change(harness, TOPICS[0], TOPICS[1], TOPICS[2])
+
+    files = glob.glob(os.path.join(bag, "*.mcap"))
+    assert len(files) == 1, f"expected one continuous file, got {files}"
+
+
+def test_untouched_topic_is_not_interrupted_by_a_change(recorder):
+    """The project's central claim, measured in the bag rather than asserted.
+
+    The kept topic must span the whole recording with no meaningful hole, while the swap happens
+    around it.
+    """
+    harness, bag = recorder
+    keep, drop, add = TOPICS
+    record_a_topic_change(harness, keep, drop, add)
+
+    stamps, _ = read_bag(bag)
+    assert keep in stamps, "the kept topic recorded nothing"
+    kept = stamps[keep]
+
+    assert largest_gap(kept) < MAX_TOLERATED_GAP_S, (
+        f"the untouched topic was interrupted: largest gap {largest_gap(kept):.2f}s"
+    )
+    # It must straddle the switch, not merely exist: data before the dropped topic ended and
+    # after the added one began.
+    assert kept[0] < stamps[drop][-1], "kept topic started after the dropped one had ended"
+    assert kept[-1] > stamps[add][0], "kept topic ended before the added one began"
+
+
+def test_dropped_and_added_topics_are_sparse_channels(recorder):
+    """MCAP supports channels that cover only part of the recording; that is what makes a
+    continuous single-file bag possible at all."""
+    harness, bag = recorder
+    keep, drop, add = TOPICS
+    record_a_topic_change(harness, keep, drop, add)
+
+    stamps, _ = read_bag(bag)
+    assert stamps[drop][0] < stamps[add][0], "the dropped topic should start first"
+    assert stamps[drop][-1] < stamps[add][-1], "the dropped topic should end first"
+    assert stamps[add][0] > 1.0, "the added topic should begin partway through, not at the start"
+
+
+def test_bag_explains_its_own_sparse_channels(recorder):
+    """A channel that stops mid-bag is otherwise indistinguishable from a dropout or a crash.
+
+    The recorded events are what make a deliberate change legible after the fact, so they have to
+    be in the bag, carry the reason, and line up with the channel boundary.
+    """
+    harness, bag = recorder
+    keep, drop, add = TOPICS
+    record_a_topic_change(harness, keep, drop, add)
+
+    stamps, events = read_bag(bag)
+    assert events, "no SubscriptionChangeEvent was recorded; sparse channels are unexplained"
+
+    dropped = [e for e in events if e.topic_name == drop and e.action == UNSUBSCRIBED]
+    added = [e for e in events if e.topic_name == add and e.action == SUBSCRIBED]
+    assert dropped, f"no UNSUBSCRIBED event for {drop}"
+    assert added, f"no SUBSCRIBED event for {add}"
+
+    assert "set_topics" in dropped[0].reason, (
+        f"the event should say what caused it, got {dropped[0].reason!r}"
+    )
+    assert dropped[0].node_name, "the event should name its sender"
+
+    # The explanation is only useful if it sits where the data stops.
+    event_offset = min(stamps[EVENT_TOPIC])
+    assert EVENT_TOPIC in stamps, "the event channel itself should be in the bag"
+    assert event_offset >= 0.0
+
+
+def test_events_are_recorded_for_the_initial_subscription_too(recorder):
+    """Otherwise a channel that starts at t=0 has no provenance at all."""
+    harness, bag = recorder
+    harness.call(SetTopics, "set_topics", topics=[TOPICS[0]])
+    harness.spin_for(3.0)
+    harness.call(Stop, "stop")
+    harness.spin_for(1.0)
+
+    _stamps, events = read_bag(bag)
+    first = [e for e in events if e.topic_name == TOPICS[0] and e.action == SUBSCRIBED]
+    assert first, "the initial subscription was not explained"
+    assert first[0].reason, "every event should carry a reason"

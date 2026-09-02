@@ -189,12 +189,21 @@ colcon test --packages-select rosbag2_dynamic_recorder_ui --python-testing pytes
 colcon test-result --verbose
 ```
 
-**Ten integration tests** start a real recorder process and drive its services, on a private
+**Fourteen integration tests** start a real recorder process and drive its services, on a private
 `ROS_DOMAIN_ID` with their own publishers — no simulator needed, and they cannot collide with
-anything else running on the machine. They cover the claims that would be expensive to
-rediscover: that a topic present before and after a `set_topics` is never torn down, that a
-stopped recorder refuses for the right reason, that `~/record` restores the previous selection,
-and that scheduled operations are refused rather than silently performed immediately.
+anything else running on the machine.
+
+Some check the service contract: that a topic present before and after a `set_topics` is never
+torn down, that a stopped recorder refuses for the right reason, that `~/record` restores the
+previous selection, that scheduled operations are refused rather than silently performed
+immediately.
+
+The rest open the resulting bag and check what was actually written — that a topic change does not
+split the file, that the untouched topic spans the whole recording without a hole, that the
+dropped and added topics appear as sparse channels, and that the bag carries the
+`SubscriptionChangeEvent`s explaining them. Measured, the untouched topic's largest gap across two
+changes is **0.05s — one publish interval**, which is the central claim of this project stated as
+a number rather than a promise.
 
 **Seven unit tests** cover the UI's rigor rule: unmeasurable values must render as *unknown*, never
 as a convenient zero. `build_state()` is a plain function precisely so this is testable without a
