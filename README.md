@@ -153,6 +153,29 @@ ros2 launch rosbag2_dynamic_recorder dynamic_recorder.launch.py \
   uri:=/tmp/mybag topics:="['/scan','/odom']"
 ```
 
+## The browser UI
+
+The way to use this without learning service-call syntax:
+
+```bash
+ros2 launch rosbag2_dynamic_recorder_ui recorder_with_ui.launch.py uri:=/tmp/mybag
+```
+
+Then open **http://localhost:8088**.
+
+Tick a topic to start recording it, untick to stop. Topics you did not touch keep recording
+without a gap. Pause, starting a new file, and stopping are buttons.
+
+The page is a single static file served by a ROS node **on your own machine** — no account, no
+cloud, no separate application, and no internet, so it works on a robot with no network. It
+depends on nothing beyond `rclpy` and the Python standard library: no web framework and no npm
+build step, because every dependency there is an install barrier.
+
+It also refuses to overstate what it knows. Where the recorder cannot actually measure something,
+the UI says **unknown** rather than showing a reassuring zero — see
+[notes/recording-stall.md](notes/recording-stall.md) for the case where `messages_lost` read 0
+while 3–4% of messages were genuinely absent.
+
 ## Development
 
 A Docker dev container is provided for working on the project itself, and for running the
@@ -182,6 +205,9 @@ git clone https://github.com/ros2/rosbag2.git src && git -C src checkout ae42fb9
 
 Notes:
 
+- The container publishes port 8088, so the browser UI is reachable at `http://localhost:8088`
+  from the host. 8088 rather than 8080 because 8080 is very often already taken. It does **not** use `network_mode: host`: on Docker Desktop that is the WSL2 VM's
+  network, which the host OS cannot reach.
 - Our packages live in `packages/` and `spike/`, mounted into the workspace separately, so the
   optional upstream checkout in `src/` stays pristine.
 - The image carries the workspace dependencies. If you add a package with new dependencies, run

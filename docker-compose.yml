@@ -10,7 +10,13 @@ services:
     # Keep running so we can exec in interactively
     stdin_open: true
     tty: true
-    network_mode: host          # ROS 2 DDS needs the host network to talk to other nodes
+    # Published ports rather than network_mode:host. On Docker Desktop, host mode means the WSL2
+    # VM's network, which the host OS cannot reach -- so the browser UI would be unreachable from
+    # the machine you are sitting at. Host mode buys nothing here anyway: the nodes all run inside
+    # this container, so DDS never crosses a boundary.
+    ports:
+      - "8088:8088"   # browser UI
+      - "8765:8765"   # foxglove_bridge, if used
     environment:
       - ROS_DOMAIN_ID=${ROS_DOMAIN_ID:-0}
       - RMW_IMPLEMENTATION=${RMW_IMPLEMENTATION:-rmw_fastrtps_cpp}

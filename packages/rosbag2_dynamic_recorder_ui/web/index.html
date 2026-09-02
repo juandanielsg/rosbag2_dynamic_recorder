@@ -1,0 +1,355 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Recorder</title>
+<style>
+  :root {
+    color-scheme: light dark;
+    --bg: #f6f7f9; --card: #fff; --fg: #14171a; --muted: #5b6570; --line: #dfe3e8;
+    --ok: #17803d; --warn: #9a6700; --bad: #b42318; --idle: #5b6570; --accent: #1f6feb;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #14171a; --card: #1c2024; --fg: #e8eaed; --muted: #9aa4af; --line: #2c3238;
+      --ok: #3fb950; --warn: #d29922; --bad: #f85149; --idle: #9aa4af; --accent: #58a6ff;
+    }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--fg);
+         font: 15px/1.5 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
+  main { max-width: 900px; margin: 0 auto; padding: 20px 16px 64px; }
+  h1 { font-size: 20px; margin: 0 0 4px; }
+  h2 { font-size: 15px; margin: 0 0 12px; }
+  .sub { color: var(--muted); font-size: 13px; margin-bottom: 20px; }
+  .card { background: var(--card); border: 1px solid var(--line); border-radius: 10px;
+          padding: 16px; margin-bottom: 16px; }
+
+  .health { display: flex; align-items: center; gap: 12px; }
+  .dot { width: 12px; height: 12px; border-radius: 50%; flex: none; background: var(--idle); }
+  .dot.ok { background: var(--ok); } .dot.warn { background: var(--warn); }
+  .dot.bad { background: var(--bad); }
+  .health-text { font-size: 17px; font-weight: 600; }
+  .health-note { color: var(--muted); font-size: 13px; margin-top: 2px; }
+
+  .stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(130px, 1fr));
+           gap: 12px; margin-top: 16px; }
+  .stat .k { color: var(--muted); font-size: 12px; }
+  .stat .v { font-size: 17px; font-variant-numeric: tabular-nums; }
+  .stat .v.unknown { color: var(--warn); font-size: 15px; }
+
+  button { font: inherit; padding: 8px 14px; border-radius: 8px; cursor: pointer;
+           border: 1px solid var(--line); background: var(--card); color: var(--fg); }
+  button:hover:not(:disabled) { border-color: var(--accent); }
+  button:disabled { opacity: .45; cursor: not-allowed; }
+  button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+  .controls { display: flex; flex-wrap: wrap; gap: 8px; }
+
+  ul.topics { list-style: none; margin: 0; padding: 0;
+              max-height: 320px; overflow-y: auto; }
+  ul.topics li { border-bottom: 1px solid var(--line); }
+  ul.topics li:last-child { border-bottom: 0; }
+  ul.topics label { display: flex; align-items: center; gap: 10px; padding: 8px 2px;
+                    cursor: pointer; }
+  ul.topics input { width: 17px; height: 17px; flex: none; cursor: pointer; }
+  .name { font-family: ui-monospace, "Cascadia Code", Consolas, monospace; font-size: 13px; }
+  .tag { margin-left: auto; font-size: 11px; color: var(--muted); }
+
+  .apply-row { display: flex; align-items: center; gap: 12px; margin-top: 14px; }
+  .pending { color: var(--muted); font-size: 13px; }
+
+  table.detail { width: 100%; border-collapse: collapse; font-size: 13px; }
+  table.detail td { padding: 6px 0; border-bottom: 1px solid var(--line); vertical-align: top; }
+  table.detail td:first-child { color: var(--muted); width: 45%; }
+  table.detail .caveat { color: var(--muted); font-size: 12px; }
+  summary { cursor: pointer; color: var(--muted); font-size: 13px; }
+
+  ol.events { list-style: none; margin: 0; padding: 0; font-size: 13px; }
+  ol.events li { padding: 6px 0; border-bottom: 1px solid var(--line); display: flex; gap: 10px; }
+  ol.events li:last-child { border-bottom: 0; }
+  .ev-sub { color: var(--ok); } .ev-unsub { color: var(--warn); }
+  .reason { color: var(--muted); margin-left: auto; font-size: 12px; }
+  .empty { color: var(--muted); font-size: 13px; }
+  #toast { position: fixed; left: 50%; transform: translateX(-50%); bottom: 20px;
+           background: var(--card); border: 1px solid var(--line); border-radius: 8px;
+           padding: 10px 16px; font-size: 14px; box-shadow: 0 4px 16px rgba(0,0,0,.18); }
+</style>
+</head>
+<body>
+<main>
+  <h1>Recording</h1>
+  <div class="sub" id="target">connecting…</div>
+
+  <div class="card">
+    <div class="health">
+      <span class="dot" id="dot"></span>
+      <div>
+        <div class="health-text" id="health">Looking for the recorder…</div>
+        <div class="health-note" id="health-note"></div>
+      </div>
+    </div>
+    <div class="stats" id="stats"></div>
+  </div>
+
+  <div class="card">
+    <h2>Controls</h2>
+    <div class="controls">
+      <button id="btn-pause">Pause</button>
+      <button id="btn-split">Start a new file</button>
+      <button id="btn-snapshot">Save snapshot</button>
+      <button id="btn-stop">Stop recording</button>
+    </div>
+  </div>
+
+  <div class="card">
+    <h2>What is being recorded</h2>
+    <ul class="topics" id="topics"><li class="empty">Waiting for topics…</li></ul>
+    <div class="apply-row">
+      <button class="primary" id="btn-apply" disabled>Apply changes</button>
+      <span class="pending" id="pending"></span>
+    </div>
+  </div>
+
+  <div class="card">
+    <h2>Recent changes</h2>
+    <ol class="events" id="events"><li class="empty">Nothing yet.</li></ol>
+  </div>
+
+  <details class="card">
+    <summary>Details and caveats</summary>
+    <table class="detail" id="detail"></table>
+  </details>
+</main>
+
+<script>
+"use strict";
+// Checkboxes the user has touched but not yet applied. Kept separate from server state so a
+// poll landing mid-edit cannot silently revert what someone just clicked.
+let pending = null;
+let state = null;
+let busy = false;
+
+const $ = (id) => document.getElementById(id);
+const fmtInt = (n) => n.toLocaleString();
+
+function fmtDuration(s) {
+  s = Math.floor(s || 0);
+  const h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60);
+  return h ? `${h}h ${m}m` : (m ? `${m}m ${s % 60}s` : `${s}s`);
+}
+
+function fmtBytes(b) {
+  if (!b) return "0 B";
+  const u = ["B", "KB", "MB", "GB", "TB"];
+  const i = Math.min(Math.floor(Math.log(b) / Math.log(1024)), u.length - 1);
+  return `${(b / Math.pow(1024, i)).toFixed(i ? 1 : 0)} ${u[i]}`;
+}
+
+function toast(text) {
+  let el = $("toast");
+  if (!el) { el = document.createElement("div"); el.id = "toast"; document.body.appendChild(el); }
+  el.textContent = text;
+  clearTimeout(el._t);
+  el._t = setTimeout(() => el.remove(), 4000);
+}
+
+// Deliberately conservative. Anything we cannot substantiate is reported as unknown rather than
+// shown as a reassuring zero -- messages have been observed missing from a bag while the
+// transport reported no loss at all.
+function health(s) {
+  if (!s.connected) {
+    return { cls: "", text: "No recorder found",
+             note: `Nothing is publishing ${s.recorder}/status. Is the recorder running?` };
+  }
+  if (s.stale) {
+    return { cls: "bad", text: "Lost contact with the recorder",
+             note: "No status update for several seconds." };
+  }
+  if (!s.recording) {
+    return { cls: "", text: "Stopped", note: "The bag is closed." };
+  }
+  if (s.paused) {
+    return { cls: "warn", text: "Paused",
+             note: "Subscriptions are still up; messages are arriving but not being written." };
+  }
+  if (s.messages_missed === null) {
+    return { cls: "warn", text: "Recording — loss cannot be measured",
+             note: "This middleware does not supply publication sequence numbers, so missing " +
+                   "messages cannot be detected. Absence of a warning is not evidence of none." };
+  }
+  if (s.messages_missed > 0) {
+    return { cls: "bad", text: `Recording — ${fmtInt(s.messages_missed)} messages missing`,
+             note: "Detected from gaps in publisher sequence numbers." };
+  }
+  return { cls: "ok", text: "Recording", note: "No missing messages detected." };
+}
+
+function renderStats(s) {
+  const missed = s.messages_missed === null
+    ? '<div class="v unknown">unknown</div>'
+    : `<div class="v">${fmtInt(s.messages_missed)}</div>`;
+  $("stats").innerHTML = `
+    <div class="stat"><div class="k">Recorded</div><div class="v">${fmtInt(s.messages_written)}</div></div>
+    <div class="stat"><div class="k">Missing</div>${missed}</div>
+    <div class="stat"><div class="k">Running for</div><div class="v">${fmtDuration(s.elapsed_seconds)}</div></div>
+    <div class="stat"><div class="k">Topics</div><div class="v">${s.subscribed_topics.length}</div></div>
+    <div class="stat"><div class="k">On disk</div><div class="v">${fmtBytes(s.bag_size_bytes)}</div></div>`;
+}
+
+function renderTopics(s) {
+  const recorded = new Set(s.subscribed_topics);
+  const checked = pending || recorded;
+  const list = s.available_topics.slice();
+  // A topic can be recorded after its publisher goes away; keep showing it or it would vanish
+  // from the UI while still in the bag.
+  for (const t of recorded) if (!list.includes(t)) list.push(t);
+  list.sort();
+
+  if (!list.length) {
+    $("topics").innerHTML = '<li class="empty">No topics are being published yet.</li>';
+    return;
+  }
+  $("topics").innerHTML = list.map((t) => {
+    const off = !s.available_topics.includes(t);
+    return `<li><label>
+      <input type="checkbox" data-topic="${t}" ${checked.has(t) ? "checked" : ""}>
+      <span class="name">${t}</span>
+      ${off ? '<span class="tag">publisher gone</span>' : ""}
+    </label></li>`;
+  }).join("");
+
+  for (const box of $("topics").querySelectorAll("input")) {
+    box.addEventListener("change", () => {
+      if (!pending) pending = new Set(recorded);
+      box.checked ? pending.add(box.dataset.topic) : pending.delete(box.dataset.topic);
+      renderPending(recorded);
+    });
+  }
+  renderPending(recorded);
+}
+
+function renderPending(recorded) {
+  if (!pending) { $("btn-apply").disabled = true; $("pending").textContent = ""; return; }
+  const add = [...pending].filter((t) => !recorded.has(t));
+  const rem = [...recorded].filter((t) => !pending.has(t));
+  if (!add.length && !rem.length) {
+    pending = null;
+    $("btn-apply").disabled = true;
+    $("pending").textContent = "";
+    return;
+  }
+  $("btn-apply").disabled = false;
+  const bits = [];
+  if (add.length) bits.push(`add ${add.length}`);
+  if (rem.length) bits.push(`remove ${rem.length}`);
+  $("pending").textContent = bits.join(", ") +
+    " — topics you did not change keep recording without a gap";
+}
+
+function renderEvents(s) {
+  if (!s.events.length) { $("events").innerHTML = '<li class="empty">Nothing yet.</li>'; return; }
+  $("events").innerHTML = s.events.map((e) => `
+    <li>
+      <span class="${e.action === "subscribed" ? "ev-sub" : "ev-unsub"}">
+        ${e.action === "subscribed" ? "added" : "removed"}</span>
+      <span class="name">${e.topic}</span>
+      <span class="reason">${e.reason}</span>
+    </li>`).join("");
+}
+
+function renderDetail(s) {
+  const missed = s.messages_missed === null
+    ? '<span class="v unknown">unknown</span><div class="caveat">The middleware does not supply publication sequence numbers here, so this cannot be measured. Not the same as zero.</div>'
+    : `${fmtInt(s.messages_missed)}<div class="caveat">Counted from gaps in each publisher's sequence numbers. Independent of whether the transport reported anything.</div>`;
+  $("detail").innerHTML = `
+    <tr><td>Bag</td><td class="name">${s.uri || "—"}</td></tr>
+    <tr><td>Storage</td><td>${s.storage_id || "—"}</td></tr>
+    <tr><td>Messages recorded</td><td>${fmtInt(s.messages_written)}</td></tr>
+    <tr><td>Messages missing</td><td>${missed}</td></tr>
+    <tr><td>Loss reported by transport</td><td>${fmtInt(s.messages_lost_reported)}
+      <div class="caveat">Only what the transport chose to report. Observed reading 0 while messages were genuinely absent, so it is not a guarantee.</div></td></tr>
+    <tr><td>Files written</td><td>${s.bag_splits + 1}</td></tr>
+    <tr><td>Size on disk</td><td>${fmtBytes(s.bag_size_bytes)}
+      <div class="caveat">Bytes flushed to disk, not bytes captured. Reads low early on because the writer buffers.</div></td></tr>
+    <tr><td>Snapshot mode</td><td>${s.snapshot_mode ? "on" : "off"}</td></tr>`;
+}
+
+function render(s) {
+  state = s;
+  $("target").textContent = s.connected
+    ? `${s.recorder} — ${s.uri || "no bag"}` : `waiting for ${s.recorder}`;
+  const h = health(s);
+  $("dot").className = "dot " + h.cls;
+  $("health").textContent = h.text;
+  $("health-note").textContent = h.note;
+
+  const on = s.connected && s.recording;
+  $("btn-pause").textContent = s.paused ? "Resume" : "Pause";
+  for (const [id, ok] of [["btn-pause", on], ["btn-split", on],
+                          ["btn-snapshot", on && s.snapshot_mode], ["btn-stop", on]]) {
+    $(id).disabled = !ok || busy;
+  }
+  $("btn-snapshot").title = s.snapshot_mode
+    ? "Flush the buffer to disk" : "Only available when the recorder runs in snapshot mode";
+
+  if (!s.connected) {
+    $("stats").innerHTML = "";
+    $("topics").innerHTML = '<li class="empty">Waiting for the recorder…</li>';
+    $("detail").innerHTML = "";
+    return;
+  }
+  renderStats(s);
+  renderTopics(s);
+  renderEvents(s);
+  renderDetail(s);
+}
+
+async function act(action, payload = {}) {
+  busy = true;
+  try {
+    const res = await fetch("/api/action", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ action, ...payload }),
+    });
+    const out = await res.json();
+    if (!out.ok) toast(out.error || "That did not work.");
+    return out;
+  } catch (err) {
+    toast(`Could not reach the recorder: ${err}`);
+    return { ok: false };
+  } finally {
+    busy = false;
+    poll();
+  }
+}
+
+async function poll() {
+  try {
+    render(await (await fetch("/api/state")).json());
+  } catch {
+    $("health").textContent = "Cannot reach the UI server";
+    $("health-note").textContent = "The page is open but the node serving it is not responding.";
+    $("dot").className = "dot bad";
+  }
+}
+
+$("btn-pause").onclick = () => act(state && state.paused ? "resume" : "pause");
+$("btn-split").onclick = () => act("split_bagfile");
+$("btn-snapshot").onclick = () => act("snapshot");
+$("btn-stop").onclick = () => {
+  if (confirm("Stop recording and close the bag? This cannot be undone.")) act("stop");
+};
+$("btn-apply").onclick = async () => {
+  if (!pending) return;
+  const topics = [...pending].sort();
+  const out = await act("set_topics", { topics });
+  if (out.ok) { pending = null; toast(`Now recording ${topics.length} topics.`); }
+};
+
+poll();
+setInterval(poll, 1000);
+</script>
+</body>
+</html>
