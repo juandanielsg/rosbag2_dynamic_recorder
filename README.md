@@ -47,11 +47,16 @@ against standard rosbag2 drives this node unchanged:
 | `~/split_bagfile` | Close the current file and open the next. |
 | `~/snapshot` | Flush the in-memory buffer. Requires `snapshot_mode`. |
 | `~/stop` | Close the bag. |
+| `~/record` | Open a new bag and start again, restoring the previous topic selection. |
 | `~/get_status` | Everything a UI or CLI needs for a status line, in one round trip. |
 
 `return_code` is `0` on success, `1` when nothing was actioned or on error. The
-timestamp-scheduled forms of `resume` and `split_bagfile` are not implemented and return an
-explicit error rather than silently acting immediately.
+timestamp-scheduled forms of `record`, `resume` and `split_bagfile` are not implemented and return
+an explicit error rather than silently acting immediately.
+
+Stopping is not a dead end: `~/record` opens a fresh bag and re-subscribes whatever was being
+recorded when you stopped. Since rosbag2 will not open over an existing bag directory, the new one
+gets the next free suffix — `mybag`, then `mybag(1)`.
 
 `~/get_status` reports the bag URI and storage id, recording/paused/snapshot state, start time and
 elapsed seconds, the subscribed topics, messages written, messages lost, split count and bag size

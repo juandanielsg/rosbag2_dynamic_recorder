@@ -27,11 +27,13 @@
 #include "rclcpp/rclcpp.hpp"
 #include "rclcpp/serialization.hpp"
 #include "rosbag2_cpp/writer.hpp"
+#include "rosbag2_storage/storage_options.hpp"
 
 #include "rosbag2_interfaces/msg/messages_lost_event.hpp"
 #include "rosbag2_interfaces/msg/write_split_event.hpp"
 #include "rosbag2_interfaces/srv/is_paused.hpp"
 #include "rosbag2_interfaces/srv/pause.hpp"
+#include "rosbag2_interfaces/srv/record.hpp"
 #include "rosbag2_interfaces/srv/resume.hpp"
 #include "rosbag2_interfaces/srv/snapshot.hpp"
 #include "rosbag2_interfaces/srv/split_bagfile.hpp"
@@ -62,8 +64,17 @@ public:
   ~DynamicRecorder() override;
 
   /// Stop recording: disable all callbacks, drop subscriptions, close the writer.
-  /// Idempotent.
+  /// Idempotent. The topic selection is remembered so record() can restore it.
   void stop();
+
+  /// Open a new bag and start recording again after stop(), restoring the topic selection that
+  /// was in place when it stopped.
+  ///
+  /// Without this, stop() is a dead end: the writer is closed with no way to reopen it, and the
+  /// only recovery is restarting the process.
+  /// \param uri Optional output path. Empty reuses the configured one.
+  /// \return false if already recording.
+  bool record(const std::string & uri = "");
 
   /// Topics currently subscribed, sorted.
   std::vector<std::string> subscribed_topics() const;
@@ -95,6 +106,7 @@ private:
   using GetSubscribedTopics =
     rosbag2_dynamic_recorder_interfaces::srv::GetSubscribedTopics;
   using Pause = rosbag2_interfaces::srv::Pause;
+  using Record = rosbag2_interfaces::srv::Record;
   using Resume = rosbag2_interfaces::srv::Resume;
   using TogglePaused = rosbag2_interfaces::srv::TogglePaused;
   using IsPaused = rosbag2_interfaces::srv::IsPaused;
@@ -158,6 +170,12 @@ private:
     std::shared_ptr<Snapshot::Response> response);
   void handle_stop(
     const std::shared_ptr<Stop::Request> request, std::shared_ptr<Stop::Response> response);
+  void handle_record(
+    const std::shared_ptr<Record::Request> request, std::shared_ptr<Record::Response> response);
+
+  /// True while a bag is open. Used to reject topic changes with an accurate reason rather than
+  /// reporting the topics themselves as unavailable.
+  bool is_recording() const;
   void handle_get_status(
     const std::shared_ptr<GetStatus::Request> request,
     std::shared_ptr<GetStatus::Response> response);
@@ -211,6 +229,7 @@ private:
   rclcpp::Service<SplitBagfile>::SharedPtr srv_split_bagfile_;
   rclcpp::Service<Snapshot>::SharedPtr srv_snapshot_;
   rclcpp::Service<Stop>::SharedPtr srv_stop_;
+  rclcpp::Service<Record>::SharedPtr srv_record_;
   rclcpp::Service<GetStatus>::SharedPtr srv_get_status_;
 
   rclcpp::Publisher<SubscriptionChangeEvent>::SharedPtr pub_subscription_change_;
@@ -256,6 +275,11 @@ private:
 
   std::string uri_;
   std::string storage_id_;
+  /// Kept so a new bag can be opened after stop() without reconstructing the node.
+  rosbag2_storage::StorageOptions storage_options_;
+  rosbag2_cpp::ConverterOptions converter_options_;
+  /// Topic selection at the moment of stop(), restored by record().
+  std::vector<std::string> topics_at_stop_;
   rclcpp::Time recording_started_;
   std::atomic_uint64_t messages_written_{0};
   std::atomic_uint64_t bag_splits_{0};

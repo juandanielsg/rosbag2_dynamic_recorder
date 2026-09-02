@@ -40,7 +40,7 @@ from rosbag2_dynamic_recorder_interfaces.srv import (
     SubscribeTopics,
     UnsubscribeTopics,
 )
-from rosbag2_interfaces.srv import Pause, Resume, Snapshot, SplitBagfile, Stop
+from rosbag2_interfaces.srv import Pause, Record, Resume, Snapshot, SplitBagfile, Stop
 
 #: Topics that are never useful to record and only clutter the picker.
 HIDDEN_TOPICS = {"/parameter_events", "/rosout"}
@@ -54,6 +54,7 @@ ACTION_SERVICES = {
     "split_bagfile": (SplitBagfile, "split_bagfile"),
     "snapshot": (Snapshot, "snapshot"),
     "stop": (Stop, "stop"),
+    "record": (Record, "record"),
 }
 
 

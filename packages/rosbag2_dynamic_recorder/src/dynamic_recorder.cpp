@@ -60,22 +60,20 @@ DynamicRecorder::DynamicRecorder(const rclcpp::NodeOptions & options)
   const auto initial_topics = declare_parameter<std::vector<std::string>>(
     "topics", std::vector<std::string>{});
 
-  rosbag2_storage::StorageOptions storage_options;
-  storage_options.uri = uri;
-  storage_options.storage_id = storage_id;
-  storage_options.snapshot_mode = snapshot_mode_;
+  storage_options_.uri = uri;
+  storage_options_.storage_id = storage_id;
+  storage_options_.snapshot_mode = snapshot_mode_;
   // Snapshot mode is a circular buffer flushed on demand, so it is meaningless without a cache.
-  storage_options.max_cache_size = static_cast<uint64_t>(max_cache_size);
-  if (snapshot_mode_ && storage_options.max_cache_size == 0) {
+  storage_options_.max_cache_size = static_cast<uint64_t>(max_cache_size);
+  if (snapshot_mode_ && storage_options_.max_cache_size == 0) {
     throw std::invalid_argument("snapshot_mode requires max_cache_size > 0");
   }
 
-  rosbag2_cpp::ConverterOptions converter_options;
-  converter_options.input_serialization_format = serialization_format_;
-  converter_options.output_serialization_format = serialization_format_;
+  converter_options_.input_serialization_format = serialization_format_;
+  converter_options_.output_serialization_format = serialization_format_;
 
   writer_ = std::make_unique<rosbag2_cpp::Writer>();
-  writer_->open(storage_options, converter_options);
+  writer_->open(storage_options_, converter_options_);
   recording_ = true;
   recording_started_ = now();
   setup_writer_events();
@@ -152,6 +150,12 @@ DynamicRecorder::DynamicRecorder(const rclcpp::NodeOptions & options)
   srv_stop_ = create_service<Stop>(
     "~/stop",
     std::bind(&DynamicRecorder::handle_stop, this,
+      std::placeholders::_1, std::placeholders::_2),
+    qos, service_callback_group_);
+
+  srv_record_ = create_service<Record>(
+    "~/record",
+    std::bind(&DynamicRecorder::handle_record, this,
       std::placeholders::_1, std::placeholders::_2),
     qos, service_callback_group_);
 
@@ -232,9 +236,13 @@ void DynamicRecorder::stop()
     // Disable callbacks before dropping the handles, so callbacks already queued in the executor
     // cannot fire on a subscription that is going away. Same idiom as RecorderImpl::stop().
     std::lock_guard<std::mutex> lock(subscriptions_mutex_);
-    for (auto & [_, subscription] : subscriptions_) {
+    topics_at_stop_.clear();
+    topics_at_stop_.reserve(subscriptions_.size());
+    for (auto & [topic_name, subscription] : subscriptions_) {
+      topics_at_stop_.push_back(topic_name);
       subscription->disable_callbacks();
     }
+    std::sort(topics_at_stop_.begin(), topics_at_stop_.end());
     subscriptions_.clear();
   }
   {
@@ -478,6 +486,15 @@ void DynamicRecorder::handle_subscribe_topics(
   const std::shared_ptr<SubscribeTopics::Request> request,
   std::shared_ptr<SubscribeTopics::Response> response)
 {
+  if (!is_recording()) {
+    // Without this the topics come back listed as "unavailable", whose documented
+    // meaning is that they are absent from the graph or ambiguous. The real reason is
+    // that there is no open bag to record into.
+    response->return_code = kReturnError;
+    response->error_string =
+      "recorder is stopped; call ~/record to open a new bag first";
+    return;
+  }
   current_reason_ = "service:subscribe_topics";
   if (!request->topic_types.empty() && request->topic_types.size() != request->topics.size()) {
     response->return_code = kReturnError;
@@ -526,6 +543,15 @@ void DynamicRecorder::handle_set_topics(
   const std::shared_ptr<SetTopics::Request> request,
   std::shared_ptr<SetTopics::Response> response)
 {
+  if (!is_recording()) {
+    // Without this the topics come back listed as "unavailable", whose documented
+    // meaning is that they are absent from the graph or ambiguous. The real reason is
+    // that there is no open bag to record into.
+    response->return_code = kReturnError;
+    response->error_string =
+      "recorder is stopped; call ~/record to open a new bag first";
+    return;
+  }
   current_reason_ = "service:set_topics";
   if (!request->topic_types.empty() && request->topic_types.size() != request->topics.size()) {
     response->return_code = kReturnError;
@@ -830,6 +856,98 @@ void DynamicRecorder::publish_status()
   if (pub_status_) {
     pub_status_->publish(build_status());
   }
+}
+
+bool DynamicRecorder::is_recording() const
+{
+  std::lock_guard<std::mutex> lock(writer_mutex_);
+  return recording_;
+}
+
+bool DynamicRecorder::record(const std::string & uri)
+{
+  std::vector<std::string> restore;
+  {
+    std::lock_guard<std::mutex> lock(writer_mutex_);
+    if (recording_) {
+      return false;
+    }
+
+    if (!uri.empty()) {
+      storage_options_.uri = uri;
+    }
+    // rosbag2 refuses to open over an existing bag directory, and stop()/record() on the same
+    // configured path would hit exactly that. Pick the next free suffix, as upstream's recorder
+    // does, rather than failing or overwriting someone's data.
+    namespace fs = std::filesystem;
+    std::error_code ec;
+    if (fs::exists(storage_options_.uri, ec)) {
+      const fs::path base(storage_options_.uri);
+      for (size_t i = 1; i < 10000; ++i) {
+        fs::path candidate = base;
+        candidate += "(" + std::to_string(i) + ")";
+        if (!fs::exists(candidate, ec)) {
+          storage_options_.uri = candidate.generic_string();
+          break;
+        }
+      }
+    }
+    uri_ = storage_options_.uri;
+
+    // A new bag has no channels, and publisher sequence positions from the previous bag would
+    // read as loss the first time each topic is seen again.
+    known_channels_.clear();
+    {
+      std::lock_guard<std::mutex> sequence_lock(sequence_mutex_);
+      last_publication_seq_.clear();
+    }
+    messages_written_.store(0, std::memory_order_relaxed);
+    messages_missed_.store(0, std::memory_order_relaxed);
+    total_messages_lost_.store(0);
+    bag_splits_.store(0, std::memory_order_relaxed);
+
+    writer_ = std::make_unique<rosbag2_cpp::Writer>();
+    writer_->open(storage_options_, converter_options_);
+    recording_ = true;
+    recording_started_ = now();
+    restore = topics_at_stop_;
+    topics_at_stop_.clear();
+  }
+
+  setup_writer_events();
+  RCLCPP_INFO(get_logger(), "Recording to '%s'", uri_.c_str());
+
+  if (!restore.empty()) {
+    current_reason_ = "service:record";
+    std::vector<std::string> subscribed;
+    std::vector<std::string> unavailable;
+    subscribe_batch(restore, {}, subscribed, unavailable);
+    for (const auto & topic : unavailable) {
+      RCLCPP_WARN(get_logger(), "Could not restore '%s' on the new bag", topic.c_str());
+    }
+  }
+  publish_status();
+  return true;
+}
+
+void DynamicRecorder::handle_record(
+  const std::shared_ptr<Record::Request> request, std::shared_ptr<Record::Response> response)
+{
+  const bool scheduled = request->start_time.sec != 0 || request->start_time.nanosec != 0;
+  if (scheduled) {
+    // Same policy as resume and split_bagfile: refuse clearly rather than accept the field and
+    // quietly do something else.
+    response->return_code = kReturnError;
+    response->error_string =
+      "scheduled start_time is not supported yet; send an empty start_time to start now";
+    return;
+  }
+  if (!record(request->uri)) {
+    response->return_code = kReturnError;
+    response->error_string = "already recording";
+    return;
+  }
+  response->return_code = kReturnSuccess;
 }
 
 }  // namespace rosbag2_dynamic_recorder

@@ -95,6 +95,7 @@
   <div class="card">
     <h2>Controls</h2>
     <div class="controls">
+      <button id="btn-record" hidden>Start recording</button>
       <button id="btn-pause">Pause</button>
       <button id="btn-split">Start a new file</button>
       <button id="btn-snapshot">Save snapshot</button>
@@ -167,7 +168,9 @@ function health(s) {
              note: "No status update for several seconds." };
   }
   if (!s.recording) {
-    return { cls: "", text: "Stopped", note: "The bag is closed." };
+    return { cls: "", text: "Stopped",
+             note: "The bag is closed. Starting again opens a new one and restores the same " +
+                   "topics." };
   }
   if (s.paused) {
     return { cls: "warn", text: "Paused",
@@ -285,6 +288,13 @@ function render(s) {
   $("health-note").textContent = h.note;
 
   const on = s.connected && s.recording;
+  // When stopped, the only useful action is starting again -- so swap the button rather than
+  // leaving a row of dead controls and no way forward.
+  $("btn-record").hidden = !s.connected || s.recording;
+  $("btn-record").disabled = busy;
+  for (const id of ["btn-pause", "btn-split", "btn-snapshot", "btn-stop"]) {
+    $(id).hidden = s.connected && !s.recording;
+  }
   $("btn-pause").textContent = s.paused ? "Resume" : "Pause";
   for (const [id, ok] of [["btn-pause", on], ["btn-split", on],
                           ["btn-snapshot", on && s.snapshot_mode], ["btn-stop", on]]) {
@@ -299,6 +309,7 @@ function render(s) {
     $("detail").innerHTML = "";
     return;
   }
+  $("btn-apply").title = s.recording ? "" : "Start recording before changing topics";
   renderStats(s);
   renderTopics(s);
   renderEvents(s);
@@ -335,6 +346,10 @@ async function poll() {
   }
 }
 
+$("btn-record").onclick = async () => {
+  const out = await act("record");
+  if (out.ok) toast("Recording into a new bag.");
+};
 $("btn-pause").onclick = () => act(state && state.paused ? "resume" : "pause");
 $("btn-split").onclick = () => act("split_bagfile");
 $("btn-snapshot").onclick = () => act("snapshot");
