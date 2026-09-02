@@ -33,8 +33,8 @@ echo "=== 3. set_topics: back to [a, b] -- drops c, re-adds b, leaves a untouche
 ros2 service call "$NODE/set_topics" "$IFACE/SetTopics" "{topics: ['/spike/a','/spike/b']}"
 sleep 5
 
-echo "=== 4. get_subscribed_topics (upstream rosbag2_interfaces service) ==="
-ros2 service call "$NODE/get_subscribed_topics" rosbag2_interfaces/srv/GetSubscribedTopics "{}"
+echo "=== 4. get_subscribed_topics ==="
+ros2 service call "$NODE/get_subscribed_topics" "$IFACE/GetSubscribedTopics" "{}"
 
 kill -INT "$REC" 2>/dev/null
 wait "$REC" 2>/dev/null

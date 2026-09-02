@@ -10,8 +10,11 @@
     distinguishable from lost data.
 
     Field naming and the return_code convention deliberately follow the style of the existing
-    rosbag2_interfaces services, so these read as a natural extension of them. Reading the current
-    set uses rosbag2_interfaces/srv/GetSubscribedTopics rather than redefining it.
+    rosbag2_interfaces services, so these read as a natural extension of them.
+
+    GetSubscribedTopics is defined here rather than reused from rosbag2_interfaces because the
+    upstream one exists only on the rolling branch, not in any release, so depending on it forced
+    a full source build of rosbag2 on every user. The definition is field-identical.
   </description>
   <maintainer email="jdsglez@gmail.com">juandanielsg</maintainer>
   <license>Apache-2.0</license>

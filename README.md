@@ -123,7 +123,7 @@ packages/
   rosbag2_dynamic_recorder/              the node
 notes/                                   architecture, spike findings, roadmap
 spike/                                   throwaway validation of the core premise
-src/                                     upstream rosbag2 checkout (untracked)
+src/                                     optional upstream rosbag2 checkout (untracked)
 ```
 
 `notes/` is worth reading before changing anything —
@@ -132,21 +132,39 @@ wrapping `Recorder`, and [spike-plan.md](notes/spike-plan.md) has measured timin
 costs ~0.4–0.6s, almost all of it message-definition resolution) plus one retracted conclusion
 worth not rediscovering.
 
+## Install
+
+You need ROS 2 Rolling. Everything else comes from apt; there is no need to build rosbag2 from
+source.
+
+```bash
+sudo apt install ros-rolling-rosbag2 ros-rolling-rosbag2-storage-mcap
+
+mkdir -p ~/ws/src && cd ~/ws/src
+git clone https://github.com/juandanielsg/rosbag2_dynamic_recorder.git
+cd ~/ws && colcon build --symlink-install
+source install/setup.bash
+```
+
+The build is two small packages and takes about a minute. Then:
+
+```bash
+ros2 launch rosbag2_dynamic_recorder dynamic_recorder.launch.py \
+  uri:=/tmp/mybag topics:="['/scan','/odom']"
+```
+
 ## Development
 
-Everything builds and runs inside a Docker container, so nothing is installed on the host.
+A Docker dev container is provided for working on the project itself, and for running the
+recorder against a simulator without installing ROS on the host.
 
 ```bash
 docker compose build
 docker compose up -d
-
-# Upstream rosbag2 sources are not tracked here; fetch them once:
-git clone https://github.com/ros2/rosbag2.git src && git -C src checkout ae42fb9
-
 docker compose exec rosbag2-dev bash -l
 ```
 
-Then inside the container:
+Inside the container:
 
 ```bash
 colcon build --packages-select \
@@ -155,11 +173,17 @@ source install/setup.bash
 bash src/packages/rosbag2_dynamic_recorder/test/m1_smoke_test.sh
 ```
 
+The upstream rosbag2 sources are **optional** — useful for reading the code this builds against,
+not required to build:
+
+```bash
+git clone https://github.com/ros2/rosbag2.git src && git -C src checkout ae42fb9
+```
+
 Notes:
 
-- **Host networking** is used because DDS discovery needs real network interfaces.
 - Our packages live in `packages/` and `spike/`, mounted into the workspace separately, so the
-  upstream checkout in `src/` stays pristine.
+  optional upstream checkout in `src/` stays pristine.
 - The image carries the workspace dependencies. If you add a package with new dependencies, run
   `rosdep install -r -y --from-paths src --ignore-src` inside the container.
 

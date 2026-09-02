@@ -30,7 +30,6 @@
 
 #include "rosbag2_interfaces/msg/messages_lost_event.hpp"
 #include "rosbag2_interfaces/msg/write_split_event.hpp"
-#include "rosbag2_interfaces/srv/get_subscribed_topics.hpp"
 #include "rosbag2_interfaces/srv/is_paused.hpp"
 #include "rosbag2_interfaces/srv/pause.hpp"
 #include "rosbag2_interfaces/srv/resume.hpp"
@@ -41,6 +40,7 @@
 #include "rosbag2_dynamic_recorder_interfaces/msg/recorder_status.hpp"
 #include "rosbag2_dynamic_recorder_interfaces/msg/subscription_change_event.hpp"
 #include "rosbag2_dynamic_recorder_interfaces/srv/get_status.hpp"
+#include "rosbag2_dynamic_recorder_interfaces/srv/get_subscribed_topics.hpp"
 #include "rosbag2_dynamic_recorder_interfaces/srv/set_topics.hpp"
 #include "rosbag2_dynamic_recorder_interfaces/srv/subscribe_topics.hpp"
 #include "rosbag2_dynamic_recorder_interfaces/srv/unsubscribe_topics.hpp"
@@ -92,7 +92,8 @@ private:
   using UnsubscribeTopics = rosbag2_dynamic_recorder_interfaces::srv::UnsubscribeTopics;
   using SetTopics = rosbag2_dynamic_recorder_interfaces::srv::SetTopics;
   using GetStatus = rosbag2_dynamic_recorder_interfaces::srv::GetStatus;
-  using GetSubscribedTopics = rosbag2_interfaces::srv::GetSubscribedTopics;
+  using GetSubscribedTopics =
+    rosbag2_dynamic_recorder_interfaces::srv::GetSubscribedTopics;
   using Pause = rosbag2_interfaces::srv::Pause;
   using Resume = rosbag2_interfaces::srv::Resume;
   using TogglePaused = rosbag2_interfaces::srv::TogglePaused;

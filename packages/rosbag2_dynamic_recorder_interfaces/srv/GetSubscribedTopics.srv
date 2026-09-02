@@ -1,0 +1,20 @@
+# Field-identical to rosbag2_interfaces/srv/GetSubscribedTopics, deliberately.
+#
+# That upstream service exists on the rosbag2 rolling branch but is NOT in any released version:
+# apt's rosbag2_interfaces 0.34.0 does not carry it. Depending on it therefore forced every user
+# to clone rosbag2 at a pinned commit and compile 22 packages -- roughly forty minutes -- to
+# obtain one .srv file, in exchange for source compatibility with clients that cannot exist yet,
+# since no released rosbag2 offers the service either.
+#
+# Defining it here drops that dependency entirely: `apt install ros-rolling-rosbag2` plus a build
+# of two small packages. The seven control services we reuse from rosbag2_interfaces (Pause,
+# Resume, TogglePaused, IsPaused, Snapshot, SplitBagfile, Stop) ARE in the release, so stock
+# compatibility is kept where it actually buys something.
+#
+# Because the fields match, switching back to the upstream definition later is a one-line change
+# once it ships in a release.
+
+---
+
+# Fully qualified names of topics currently subscribed by the recorder.
+string[] topics
