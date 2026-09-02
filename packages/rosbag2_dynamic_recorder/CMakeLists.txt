@@ -61,6 +61,16 @@ install(
   DESTINATION share/${PROJECT_NAME}
 )
 
+if(BUILD_TESTING)
+  # Integration tests: they start a real recorder process and drive its services, because the
+  # contract worth protecting is the service behaviour, not the internals.
+  find_package(ament_cmake_pytest REQUIRED)
+  ament_add_pytest_test(test_recorder_services test/test_recorder_services.py
+    TIMEOUT 600
+    ENV RCUTILS_LOGGING_BUFFERED_STREAM=1
+  )
+endif()
+
 ament_export_targets(${PROJECT_NAME} HAS_LIBRARY_TARGET)
 ament_export_dependencies(
   rclcpp

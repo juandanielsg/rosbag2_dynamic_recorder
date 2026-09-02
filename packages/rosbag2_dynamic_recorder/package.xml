@@ -27,6 +27,10 @@
   <depend>rmw</depend>
 
   <exec_depend>rosbag2_storage_mcap</exec_depend>
+
+  <test_depend>ament_cmake_pytest</test_depend>
+  <test_depend>rclpy</test_depend>
+  <test_depend>std_msgs</test_depend>
   <exec_depend>launch</exec_depend>
   <exec_depend>launch_ros</exec_depend>
 

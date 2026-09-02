@@ -58,6 +58,46 @@ ACTION_SERVICES = {
 }
 
 
+def build_state(status, age, recorder, available_topics, events):
+    """Shape the recorder status into what the page renders.
+
+    Kept out of the Node so it can be tested without a ROS graph, because the rule it encodes is
+    the one most worth protecting: a field the recorder cannot vouch for is reported as unknown,
+    never as a convenient zero. `messages_missed` is only meaningful when the middleware supplies
+    publication sequence numbers, and `messages_lost` counts only what the transport chose to
+    report -- which has been observed reading 0 while messages were genuinely absent from a bag.
+    """
+    if status is None:
+        return {
+            "connected": False,
+            "recorder": recorder,
+            "available_topics": available_topics,
+            "events": events,
+        }
+
+    sequence_ok = bool(status.sequence_numbers_available)
+    return {
+        "connected": True,
+        "stale": age is not None and age > 5.0,
+        "recorder": recorder,
+        "uri": status.uri,
+        "storage_id": status.storage_id,
+        "recording": bool(status.recording),
+        "paused": bool(status.paused),
+        "snapshot_mode": bool(status.snapshot_mode),
+        "elapsed_seconds": status.elapsed_seconds,
+        "subscribed_topics": list(status.subscribed_topics),
+        "available_topics": available_topics,
+        "messages_written": status.messages_written,
+        # None means "cannot tell". The page renders that as unknown rather than as zero.
+        "messages_missed": status.messages_missed if sequence_ok else None,
+        "messages_lost_reported": status.messages_lost,
+        "bag_splits": status.bag_splits,
+        "bag_size_bytes": status.bag_size_bytes,
+        "events": events,
+    }
+
+
 class RecorderUi(Node):
     def __init__(self):
         super().__init__("rosbag2_dynamic_recorder_ui")
@@ -142,47 +182,12 @@ class RecorderUi(Node):
         )
 
     def snapshot_state(self):
-        """Everything the page needs, in one response.
-
-        Rigor rule: a field the recorder cannot vouch for is reported as unknown, never as a
-        convenient zero. `messages_missed` is only meaningful when the middleware supplies
-        publication sequence numbers, and `messages_lost` counts only what the transport chose to
-        report -- which has been observed reading 0 while messages were genuinely absent.
-        """
+        """Everything the page needs, in one response."""
         with self._lock:
             status = self._status
             age = time.monotonic() - self._status_stamp if status else None
             events = list(reversed(self._events[-15:]))
-
-        if status is None:
-            return {
-                "connected": False,
-                "recorder": self.recorder,
-                "available_topics": self.available_topics(),
-                "events": events,
-            }
-
-        sequence_ok = bool(status.sequence_numbers_available)
-        return {
-            "connected": True,
-            "stale": age is not None and age > 5.0,
-            "recorder": self.recorder,
-            "uri": status.uri,
-            "storage_id": status.storage_id,
-            "recording": bool(status.recording),
-            "paused": bool(status.paused),
-            "snapshot_mode": bool(status.snapshot_mode),
-            "elapsed_seconds": status.elapsed_seconds,
-            "subscribed_topics": list(status.subscribed_topics),
-            "available_topics": self.available_topics(),
-            "messages_written": status.messages_written,
-            # None means "cannot tell", and the page renders that as unknown rather than zero.
-            "messages_missed": status.messages_missed if sequence_ok else None,
-            "messages_lost_reported": status.messages_lost,
-            "bag_splits": status.bag_splits,
-            "bag_size_bytes": status.bag_size_bytes,
-            "events": events,
-        }
+        return build_state(status, age, self.recorder, self.available_topics(), events)
 
     def call(self, action, payload):
         client = self._service_clients.get(action)

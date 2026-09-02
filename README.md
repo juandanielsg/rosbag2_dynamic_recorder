@@ -181,6 +181,29 @@ the UI says **unknown** rather than showing a reassuring zero — see
 [notes/recording-stall.md](notes/recording-stall.md) for the case where `messages_lost` read 0
 while 3–4% of messages were genuinely absent.
 
+## Tests
+
+```bash
+colcon test --packages-select rosbag2_dynamic_recorder
+colcon test --packages-select rosbag2_dynamic_recorder_ui --python-testing pytest
+colcon test-result --verbose
+```
+
+**Ten integration tests** start a real recorder process and drive its services, on a private
+`ROS_DOMAIN_ID` with their own publishers — no simulator needed, and they cannot collide with
+anything else running on the machine. They cover the claims that would be expensive to
+rediscover: that a topic present before and after a `set_topics` is never torn down, that a
+stopped recorder refuses for the right reason, that `~/record` restores the previous selection,
+and that scheduled operations are refused rather than silently performed immediately.
+
+**Seven unit tests** cover the UI's rigor rule: unmeasurable values must render as *unknown*, never
+as a convenient zero. `build_state()` is a plain function precisely so this is testable without a
+ROS graph.
+
+The `--python-testing pytest` flag on the second command is a colcon quirk, not ours: without it
+colcon picks the deprecated setuptools test runner for `ament_python` packages, collects nothing,
+and exits 5 as though something failed.
+
 ## Development
 
 A Docker dev container is provided for working on the project itself, and for running the
