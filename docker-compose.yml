@@ -16,7 +16,8 @@ services:
     # this container, so DDS never crosses a boundary.
     ports:
       - "8088:8088"   # browser UI
-      - "8765:8765"   # foxglove_bridge, if used
+      # 8765 (foxglove_bridge) is deliberately NOT published here: the demo container publishes
+      # it, and two compose projects binding the same host port cannot both start.
     environment:
       - ROS_DOMAIN_ID=${ROS_DOMAIN_ID:-0}
       - RMW_IMPLEMENTATION=${RMW_IMPLEMENTATION:-rmw_fastrtps_cpp}
