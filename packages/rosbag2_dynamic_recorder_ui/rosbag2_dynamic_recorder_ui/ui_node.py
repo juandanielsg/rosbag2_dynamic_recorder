@@ -96,6 +96,7 @@ def build_state(status, age, recorder, available_topics, events):
         # None means "cannot tell". The page renders that as unknown rather than as zero.
         "messages_missed": status.messages_missed if sequence_ok else None,
         "messages_lost_reported": status.messages_lost,
+        "write_errors": status.write_errors,
         "bag_splits": status.bag_splits,
         "bag_size_bytes": status.bag_size_bytes,
         "events": events,
@@ -112,7 +113,10 @@ class RecorderUi(Node):
         # 8088 rather than 8080: 8080 is the most commonly occupied port on a development
         # machine, and a port clash is a miserable first-run experience.
         self.port = self.declare_parameter("port", 8088).value
-        self.bind = self.declare_parameter("bind", "0.0.0.0").value
+        # Loopback by default. The UI has no authentication of any kind, so binding to all
+        # interfaces would let anyone who can reach the robot stop a recording or change what is
+        # being captured. Opt in explicitly with bind:=0.0.0.0, and read the warning below.
+        self.bind = self.declare_parameter("bind", "127.0.0.1").value
 
         self._lock = threading.Lock()
         self._status = None
@@ -167,6 +171,12 @@ class RecorderUi(Node):
         self.get_logger().info(
             f"UI on http://localhost:{self.port}  (controlling {self.recorder})"
         )
+        if self.bind not in ("127.0.0.1", "localhost", "::1"):
+            self.get_logger().warn(
+                f"UI is bound to {self.bind}, so anyone who can reach this machine on port "
+                f"{self.port} can stop the recording or change what is recorded. There is no "
+                "authentication. Use bind:=127.0.0.1 unless the network is trusted."
+            )
 
     def _fetch_profiles(self):
         if not self._profiles_client.wait_for_service(timeout_sec=30.0):

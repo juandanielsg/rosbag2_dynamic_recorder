@@ -36,10 +36,12 @@ def _status(**overrides):
         snapshot_mode=False,
         elapsed_seconds=12.5,
         subscribed_topics=["/a", "/b"],
+        active_profile="",
         messages_written=100,
         messages_missed=0,
         sequence_numbers_available=True,
         messages_lost=0,
+        write_errors=0,
         bag_splits=0,
         bag_size_bytes=2048,
     )

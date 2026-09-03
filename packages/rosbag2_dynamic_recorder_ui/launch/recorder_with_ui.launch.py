@@ -45,7 +45,8 @@ ARGUMENTS = [
      'Seconds between MessagesLostEvent publications. 0 disables reporting.'),
     ('params_file', '', 'Optional YAML of extra recorder parameters, e.g. recording profiles.'),
     ('port', '8088', 'Port for the browser UI.'),
-    ('bind', '0.0.0.0', 'Address the UI listens on. Use 127.0.0.1 to allow local access only.'),
+    ('bind', '127.0.0.1',
+     'Address the UI listens on. Loopback by default because the UI has no authentication; use 0.0.0.0 only on a trusted network.'),
 ]
 
 

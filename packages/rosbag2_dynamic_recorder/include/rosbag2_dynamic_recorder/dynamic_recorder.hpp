@@ -141,6 +141,10 @@ private:
   std::optional<std::string> resolve_type(const std::string & topic_name) const;
 
   /// Create the writer channel and the subscription for one topic.
+  ///
+  /// Never throws. A bad topic name or an unloadable type would otherwise escape a service
+  /// callback and take the whole process down, so failures are reported through the return value
+  /// and last_failure_reason_ instead.
   /// \return true if the topic is subscribed on return (including if it already was).
   bool subscribe_topic(const std::string & topic_name, const std::string & topic_type);
 
@@ -293,6 +297,14 @@ private:
   /// service handler runs in service_callback_group_, which is MutuallyExclusive: only one
   /// topic-changing operation is ever in flight.
   std::string current_reason_{"startup"};
+
+  /// Why the most recent subscribe attempt failed, for the service to report. Shares
+  /// current_reason_'s safety argument: only one service handler runs at a time.
+  std::string last_failure_reason_;
+
+  /// Messages that arrived but could not be written. Surfaced in the status because silently
+  /// dropping them would be worse than the crash this replaced.
+  std::atomic_uint64_t write_errors_{0};
 
   std::string serialization_format_;
   bool record_subscription_events_{true};

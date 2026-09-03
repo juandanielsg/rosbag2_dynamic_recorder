@@ -329,7 +329,16 @@ bool DynamicRecorder::subscribe_topic(
     }
   }
 
-  const auto endpoints = get_publishers_info_by_topic(topic_name);
+  // The graph query validates the topic name and throws on a malformed one, so it needs the same
+  // protection as the subscription call below -- this is the first thing an invalid name hits.
+  std::vector<rclcpp::TopicEndpointInfo> endpoints;
+  try {
+    endpoints = get_publishers_info_by_topic(topic_name);
+  } catch (const std::exception & e) {
+    last_failure_reason_ = "'" + topic_name + "' is not a usable topic name: " + e.what();
+    RCLCPP_ERROR(get_logger(), "%s", last_failure_reason_.c_str());
+    return false;
+  }
   const auto qos = rosbag2_storage::Rosbag2QoS::adapt_request_to_offers(topic_name, endpoints);
 
   // Diagnostic: messages have been observed going missing from bags without the transport or the
@@ -361,7 +370,17 @@ bool DynamicRecorder::subscribe_topic(
     if (!recording_) {
       return false;
     }
-    if (known_channels_.count(topic_name) == 0) {
+    const auto known = known_channels_.find(topic_name);
+    if (known != known_channels_.end() && known->second != topic_type) {
+      // The bag already has a channel for this topic under a different type. Writing the new
+      // type into it would silently corrupt the recording -- a publisher restarted with a
+      // changed type is the realistic way to get here. Refuse instead.
+      last_failure_reason_ = "'" + topic_name + "' is already in this bag as '" + known->second +
+        "'; it now publishes '" + topic_type + "'. Start a new bag to record the new type.";
+      RCLCPP_ERROR(get_logger(), "%s", last_failure_reason_.c_str());
+      return false;
+    }
+    if (known == known_channels_.end()) {
       std::vector<rclcpp::QoS> offered_qos_profiles;
       offered_qos_profiles.reserve(endpoints.size());
       for (const auto & endpoint : endpoints) {
@@ -377,7 +396,13 @@ bool DynamicRecorder::subscribe_topic(
       };
       // Resolves the message definition internally; this is the expensive call (~300-470ms for a
       // type with nested members), which is why known_channels_ guards it.
-      writer_->create_topic(topic_metadata);
+      try {
+        writer_->create_topic(topic_metadata);
+      } catch (const std::exception & e) {
+        last_failure_reason_ = "could not create a channel for '" + topic_name + "': " + e.what();
+        RCLCPP_ERROR(get_logger(), "%s", last_failure_reason_.c_str());
+        return false;
+      }
       known_channels_.emplace(topic_name, topic_type);
     }
   }
@@ -439,12 +464,34 @@ bool DynamicRecorder::subscribe_topic(
       if (!recording_) {
         return;
       }
-      writer_->write(message, topic_name, topic_type, recv_timestamp, send_timestamp);
-      messages_written_.fetch_add(1, std::memory_order_relaxed);
+      try {
+        writer_->write(message, topic_name, topic_type, recv_timestamp, send_timestamp);
+        messages_written_.fetch_add(1, std::memory_order_relaxed);
+      } catch (const std::exception & e) {
+        // A full disk used to take the whole node down and with it the rest of the recording.
+        // Count it, say so at a rate that cannot itself become the problem, and keep going: the
+        // remaining topics and any later recovery are worth more than a clean death.
+        write_errors_.fetch_add(1, std::memory_order_relaxed);
+        RCLCPP_ERROR_THROTTLE(get_logger(), *get_clock(), 5000,
+          "Failed to write a message on '%s': %s (%lu write errors so far)",
+          topic_name.c_str(), e.what(),
+          static_cast<unsigned long>(write_errors_.load(std::memory_order_relaxed)));
+      }
     };
 
-  auto subscription = create_generic_subscription(
-    topic_name, topic_type, qos, callback, subscription_options);
+  rclcpp::GenericSubscription::SharedPtr subscription;
+  try {
+    subscription = create_generic_subscription(
+      topic_name, topic_type, qos, callback, subscription_options);
+  } catch (const std::exception & e) {
+    // Reachable from any caller that supplies topic_types explicitly, since that path skips the
+    // graph lookup: an invalid topic name or an unloadable type lands here. It used to terminate
+    // the process from inside a service callback.
+    last_failure_reason_ =
+      "could not subscribe to '" + topic_name + "' as '" + topic_type + "': " + e.what();
+    RCLCPP_ERROR(get_logger(), "%s", last_failure_reason_.c_str());
+    return false;
+  }
 
   {
     std::lock_guard<std::mutex> lock(subscriptions_mutex_);
@@ -496,6 +543,7 @@ void DynamicRecorder::subscribe_batch(
   std::vector<std::string> & subscribed_out,
   std::vector<std::string> & unavailable_out)
 {
+  last_failure_reason_.clear();
   for (size_t i = 0; i < topics.size(); ++i) {
     const auto & topic_name = topics[i];
 
@@ -505,9 +553,9 @@ void DynamicRecorder::subscribe_batch(
     } else {
       const auto resolved = resolve_type(topic_name);
       if (!resolved.has_value()) {
-        RCLCPP_WARN(get_logger(),
-          "Cannot resolve a single type for '%s'; not on the graph, or ambiguous",
-          topic_name.c_str());
+        last_failure_reason_ = "cannot resolve a single type for '" + topic_name +
+          "'; it is not on the graph, or publishes more than one type";
+        RCLCPP_WARN(get_logger(), "%s", last_failure_reason_.c_str());
         unavailable_out.push_back(topic_name);
         continue;
       }
@@ -550,9 +598,15 @@ void DynamicRecorder::handle_subscribe_topics(
   // not an error.
   if (response->subscribed_topics.empty() && !request->topics.empty()) {
     response->return_code = kReturnError;
-    response->error_string = "none of the requested topics could be subscribed";
+    response->error_string = last_failure_reason_.empty()
+      ? "none of the requested topics could be subscribed"
+      : last_failure_reason_;
   } else {
     response->return_code = kReturnSuccess;
+    // Partial success still has to say what went wrong, or a caller sees an empty error and a
+    // short subscribed list with no explanation.
+    response->error_string =
+      response->unavailable_topics.empty() ? "" : last_failure_reason_;
   }
   publish_status();
 }
@@ -686,17 +740,27 @@ void DynamicRecorder::emit_subscription_change(
   if (!recording_) {
     return;
   }
-  if (known_channels_.count(event_topic) == 0) {
-    const rosbag2_storage::TopicMetadata metadata{
-      0u, event_topic, event_type, serialization_format_, {}, ""};
-    writer_->create_topic(metadata);
-    known_channels_.emplace(event_topic, event_type);
+  try {
+    if (known_channels_.count(event_topic) == 0) {
+      const rosbag2_storage::TopicMetadata metadata{
+        0u, event_topic, event_type, serialization_format_, {}, ""};
+      writer_->create_topic(metadata);
+      known_channels_.emplace(event_topic, event_type);
+    }
+  } catch (const std::exception & e) {
+    RCLCPP_ERROR(get_logger(), "Could not create the event channel: %s", e.what());
+    return;
   }
   const auto stamp =
     static_cast<rcutils_time_point_value_t>(event.stamp.sec) * 1000000000LL + event.stamp.nanosec;
   // Deliberately not gated on paused_: a topic change while paused still has to be explicable.
-  writer_->write(serialized_ptr, event_topic, event_type, stamp, stamp);
-  messages_written_.fetch_add(1, std::memory_order_relaxed);
+  try {
+    writer_->write(serialized_ptr, event_topic, event_type, stamp, stamp);
+    messages_written_.fetch_add(1, std::memory_order_relaxed);
+  } catch (const std::exception & e) {
+    write_errors_.fetch_add(1, std::memory_order_relaxed);
+    RCLCPP_ERROR(get_logger(), "Could not record a subscription change: %s", e.what());
+  }
 }
 
 void DynamicRecorder::pause()
@@ -726,7 +790,12 @@ bool DynamicRecorder::split_bagfile()
   if (!recording_) {
     return false;
   }
-  writer_->split_bagfile();
+  try {
+    writer_->split_bagfile();
+  } catch (const std::exception & e) {
+    RCLCPP_ERROR(get_logger(), "Failed to split the bag: %s", e.what());
+    return false;
+  }
   return true;
 }
 
@@ -736,7 +805,12 @@ bool DynamicRecorder::take_snapshot()
   if (!recording_) {
     return false;
   }
-  return writer_->take_snapshot();
+  try {
+    return writer_->take_snapshot();
+  } catch (const std::exception & e) {
+    RCLCPP_ERROR(get_logger(), "Snapshot failed: %s", e.what());
+    return false;
+  }
 }
 
 uint64_t DynamicRecorder::total_messages_lost() const
@@ -884,6 +958,7 @@ DynamicRecorder::RecorderStatus DynamicRecorder::build_status() const
   status.active_profile = active_profile();
   status.messages_written = messages_written_.load(std::memory_order_relaxed);
   status.messages_lost = total_messages_lost_.load();
+  status.write_errors = write_errors_.load(std::memory_order_relaxed);
   status.messages_missed = messages_missed_.load(std::memory_order_relaxed);
   status.sequence_numbers_available =
     sequence_numbers_available_.load(std::memory_order_relaxed);
@@ -947,8 +1022,20 @@ bool DynamicRecorder::record(const std::string & uri)
     total_messages_lost_.store(0);
     bag_splits_.store(0, std::memory_order_relaxed);
 
-    writer_ = std::make_unique<rosbag2_cpp::Writer>();
-    writer_->open(storage_options_, converter_options_);
+    auto writer = std::make_unique<rosbag2_cpp::Writer>();
+    try {
+      writer->open(storage_options_, converter_options_);
+    } catch (const std::exception & e) {
+      // Bad path, no permission, or the suffix search below exhausted its range. Report it
+      // rather than terminating from inside a service callback, and leave the recorder stopped
+      // but alive so the caller can fix the path and try again.
+      last_failure_reason_ = std::string("could not open '") + storage_options_.uri + "': " +
+        e.what();
+      RCLCPP_ERROR(get_logger(), "%s", last_failure_reason_.c_str());
+      return false;
+    }
+    writer_ = std::move(writer);
+    write_errors_.store(0, std::memory_order_relaxed);
     recording_ = true;
     recording_started_ = now();
     restore = topics_at_stop_;
@@ -983,9 +1070,12 @@ void DynamicRecorder::handle_record(
       "scheduled start_time is not supported yet; send an empty start_time to start now";
     return;
   }
+  const bool was_recording = is_recording();
   if (!record(request->uri)) {
     response->return_code = kReturnError;
-    response->error_string = "already recording";
+    response->error_string = was_recording
+      ? "already recording"
+      : (last_failure_reason_.empty() ? "could not start recording" : last_failure_reason_);
     return;
   }
   response->return_code = kReturnSuccess;

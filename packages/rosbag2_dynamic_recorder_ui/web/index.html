@@ -185,6 +185,11 @@ function health(s) {
     return { cls: "warn", text: "Paused",
              note: "Subscriptions are still up; messages are arriving but not being written." };
   }
+  if (s.write_errors > 0) {
+    return { cls: "bad", text: `Recording — ${fmtInt(s.write_errors)} messages could not be written`,
+             note: "These reached the recorder but failed to reach the bag; a full disk is the " +
+                   "usual cause. The recording is incomplete and is still running." };
+  }
   if (s.messages_missed === null) {
     return { cls: "warn", text: "Recording — loss cannot be measured",
              note: "This middleware does not supply publication sequence numbers, so missing " +
@@ -302,6 +307,8 @@ function renderDetail(s) {
     <tr><td>Storage</td><td>${s.storage_id || "—"}</td></tr>
     <tr><td>Messages recorded</td><td>${fmtInt(s.messages_written)}</td></tr>
     <tr><td>Messages missing</td><td>${missed}</td></tr>
+    <tr><td>Failed writes</td><td>${fmtInt(s.write_errors)}
+      <div class="caveat">Messages that arrived but could not be written, usually a full disk. Unlike the two figures above these are known-lost with certainty.</div></td></tr>
     <tr><td>Loss reported by transport</td><td>${fmtInt(s.messages_lost_reported)}
       <div class="caveat">Only what the transport chose to report. Observed reading 0 while messages were genuinely absent, so it is not a guarantee.</div></td></tr>
     <tr><td>Files written</td><td>${s.bag_splits + 1}</td></tr>

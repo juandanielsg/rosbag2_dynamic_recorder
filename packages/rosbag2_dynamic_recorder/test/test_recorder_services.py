@@ -467,3 +467,60 @@ def test_profiles_absent_when_none_configured(recorder):
     harness, _ = recorder
     assert harness.call(GetProfiles, "get_profiles").profiles == []
     assert harness.status().active_profile == ""
+
+
+def test_invalid_topic_name_is_refused_not_fatal(recorder):
+    """Regression: this used to terminate the process.
+
+    Supplying topic_types skips the graph lookup, so a bad name reaches
+    create_generic_subscription directly. An exception there escapes the service callback and
+    takes the whole node down, losing the recording along with it.
+    """
+    harness, _ = recorder
+    response = harness.call(
+        SubscribeTopics, "subscribe_topics",
+        topics=["not a valid topic name!"], topic_types=["std_msgs/msg/String"],
+    )
+    assert response.return_code != 0
+    assert response.error_string, "the failure should say what went wrong"
+
+    # The point of the test: the recorder is still alive and usable afterwards.
+    assert harness.status().recording is True
+    ok = harness.call(SubscribeTopics, "subscribe_topics", topics=[TOPICS[0]])
+    assert ok.return_code == 0, "the node should still work after a rejected request"
+
+
+def test_unloadable_type_is_refused_not_fatal(recorder):
+    """Same path, reached through a type that has no message library to load."""
+    harness, _ = recorder
+    response = harness.call(
+        SubscribeTopics, "subscribe_topics",
+        topics=[TOPICS[0]], topic_types=["no_such_pkg/msg/NoSuchType"],
+    )
+    assert response.return_code != 0
+    assert harness.status().recording is True
+
+
+def test_changed_type_on_a_known_topic_is_refused(recorder):
+    """A bag channel is bound to one type. Writing a different type into it would silently
+    corrupt the recording, so the subscribe is refused instead."""
+    harness, _ = recorder
+    assert harness.call(
+        SubscribeTopics, "subscribe_topics", topics=[TOPICS[0]]).return_code == 0
+    harness.call(UnsubscribeTopics, "unsubscribe_topics", topics=[TOPICS[0]])
+
+    response = harness.call(
+        SubscribeTopics, "subscribe_topics",
+        topics=[TOPICS[0]], topic_types=["sensor_msgs/msg/Imu"],
+    )
+    assert response.return_code != 0
+    assert "already in this bag" in response.error_string, response.error_string
+    assert harness.status().recording is True
+
+
+def test_status_reports_no_write_errors_on_a_healthy_run(recorder):
+    """write_errors is known-lost data, so a healthy recording must report exactly zero."""
+    harness, _ = recorder
+    harness.call(SubscribeTopics, "subscribe_topics", topics=[TOPICS[0]])
+    harness.spin_for(2.0)
+    assert harness.status().write_errors == 0

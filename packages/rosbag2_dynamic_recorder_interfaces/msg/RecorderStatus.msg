@@ -61,6 +61,14 @@ uint64 messages_missed
 # means anything at all. If false, treat messages_missed as unknown rather than zero.
 bool sequence_numbers_available
 
+# Messages that reached the recorder but could not be written, e.g. because the disk filled.
+#
+# These are lost data the recorder knows about with certainty, distinct from messages_missed
+# (which never arrived) and messages_lost (which the transport reported). Any non-zero value here
+# means the bag is incomplete and the recorder kept running anyway, which is deliberate: dying
+# would lose the rest of the recording too.
+uint64 write_errors
+
 # Number of times the bag file has rolled over, whether by ~/split_bagfile or by a size or
 # duration limit.
 uint64 bag_splits

@@ -201,6 +201,10 @@ Then open **http://localhost:8088**.
 Tick a topic to start recording it, untick to stop. Topics you did not touch keep recording
 without a gap. Pause, starting a new file, and stopping are buttons.
 
+By default it listens on **loopback only**, because it has no authentication: anyone who can
+reach the port can stop your recording. Pass `bind:=0.0.0.0` to expose it on a trusted network —
+and note that inside Docker you must, or the published port has nothing to forward to.
+
 The page is a single static file served by a ROS node **on your own machine** — no account, no
 cloud, no separate application, and no internet, so it works on a robot with no network. It
 depends on nothing beyond `rclpy` and the Python standard library: no web framework and no npm
@@ -273,7 +277,8 @@ git clone https://github.com/ros2/rosbag2.git src && git -C src checkout ae42fb9
 Notes:
 
 - The container publishes port 8088, so the browser UI is reachable at `http://localhost:8088`
-  from the host. 8088 rather than 8080 because 8080 is very often already taken. It does **not** use `network_mode: host`: on Docker Desktop that is the WSL2 VM's
+  from the host — but you must launch the UI with `bind:=0.0.0.0`, since the default loopback bind
+  is loopback *inside the container* and Docker would have nothing to forward to. 8088 rather than 8080 because 8080 is very often already taken. It does **not** use `network_mode: host`: on Docker Desktop that is the WSL2 VM's
   network, which the host OS cannot reach.
 - Our packages live in `packages/` and `spike/`, mounted into the workspace separately, so the
   optional upstream checkout in `src/` stays pristine.
