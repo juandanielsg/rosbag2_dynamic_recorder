@@ -70,7 +70,9 @@ MAX_TOLERATED_GAP_S = 2.0
 # Away from the default 0 so a developer's own nodes cannot join the test graph.
 # Set before any rclpy.init(): the test node and the recorder subprocess must land on the SAME
 # domain, or they simply never see each other and every service call times out.
-TEST_DOMAIN_ID = "71"
+# Overridable, because 71 is only "probably unused" -- anyone who happens to work on that domain
+# would otherwise see their own nodes join the test graph and get confusing failures.
+TEST_DOMAIN_ID = os.environ.get("RDR_TEST_DOMAIN_ID", "71")
 os.environ["ROS_DOMAIN_ID"] = TEST_DOMAIN_ID
 NODE = "/rosbag2_dynamic_recorder"
 TOPICS = ["/rdr_test/alpha", "/rdr_test/beta", "/rdr_test/gamma"]

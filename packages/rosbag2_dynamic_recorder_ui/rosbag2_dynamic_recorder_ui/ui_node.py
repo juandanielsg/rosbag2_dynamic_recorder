@@ -179,20 +179,40 @@ class RecorderUi(Node):
             )
 
     def _fetch_profiles(self):
-        if not self._profiles_client.wait_for_service(timeout_sec=30.0):
-            self.get_logger().info("No ~/get_profiles service; profiles will not be offered")
-            return
-        future = self._profiles_client.call_async(GetProfiles.Request())
-        deadline = time.monotonic() + 15.0
-        while not future.done() and time.monotonic() < deadline:
-            time.sleep(0.05)
-        if not future.done():
-            return
-        with self._lock:
-            self._profiles = [
-                {"name": p.name, "topics": list(p.topics)} for p in future.result().profiles
-            ]
-        self.get_logger().info(f"Offering {len(self._profiles)} recording profile(s)")
+        """Keep trying until profiles are known.
+
+        The UI is routinely started alongside or before the recorder, and a one-shot attempt that
+        gave up left the profile buttons permanently absent with no way to recover short of
+        restarting the UI. Retrying costs one service call every 15s until it succeeds.
+        """
+        announced = False
+        while rclpy.ok():
+            if self._profiles_client.wait_for_service(timeout_sec=15.0):
+                future = self._profiles_client.call_async(GetProfiles.Request())
+                deadline = time.monotonic() + 15.0
+                while not future.done() and time.monotonic() < deadline:
+                    time.sleep(0.05)
+                if future.done() and future.result() is not None:
+                    profiles = [
+                        {"name": p.name, "topics": list(p.topics)}
+                        for p in future.result().profiles
+                    ]
+                    with self._lock:
+                        self._profiles = profiles
+                    if profiles:
+                        self.get_logger().info(f"Offering {len(profiles)} recording profile(s)")
+                        return
+                    # An empty list is a real answer -- the recorder has no profiles configured --
+                    # so say so once and stop asking.
+                    if not announced:
+                        self.get_logger().info("Recorder has no profiles configured")
+                    return
+            if not announced:
+                self.get_logger().info(
+                    "Waiting for ~/get_profiles; profile buttons will appear when it responds"
+                )
+                announced = True
+            time.sleep(5.0)
 
     # --- ROS side ---------------------------------------------------------
     def _on_status(self, msg):

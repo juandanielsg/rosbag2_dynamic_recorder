@@ -16,6 +16,8 @@
 #define ROSBAG2_DYNAMIC_RECORDER__DYNAMIC_RECORDER_HPP_
 
 #include <atomic>
+#include <chrono>
+#include <map>
 #include <cstdint>
 #include <memory>
 #include <mutex>
@@ -136,9 +138,14 @@ private:
   using WriteSplitEvent = rosbag2_interfaces::msg::WriteSplitEvent;
   using MessagesLostEvent = rosbag2_interfaces::msg::MessagesLostEvent;
 
-  /// Resolve a topic's type from the ROS graph.
+  /// Resolve a topic's type from an already-fetched view of the graph.
+  ///
+  /// Takes the graph snapshot rather than querying, so a batch of twenty topics costs one graph
+  /// query instead of twenty.
   /// \return the type, or nullopt if the topic is absent or offers more than one type.
-  std::optional<std::string> resolve_type(const std::string & topic_name) const;
+  std::optional<std::string> resolve_type(
+    const std::string & topic_name,
+    const std::map<std::string, std::vector<std::string>> & graph) const;
 
   /// Create the writer channel and the subscription for one topic.
   ///
@@ -209,6 +216,9 @@ private:
 
   /// Sum of the file sizes in the bag directory. Returns 0 rather than throwing if the directory
   /// cannot be read, since a status call must not fail just because of a stat error.
+  ///
+  /// Cached briefly: this is called from the status publication every second, and a robot
+  /// recording for hours accumulates split files that would otherwise all be stat'ed each time.
   uint64_t bag_size_bytes() const;
 
   /// Single source of truth for both ~/status and ~/get_status, so the two cannot drift.
@@ -312,6 +322,12 @@ private:
 
   std::string uri_;
   std::string storage_id_;
+
+  /// Short-lived cache for bag_size_bytes(). Mutable because the getter is const and this is
+  /// memoisation, not state. See kBagSizeCacheTtl for why staleness here is acceptable.
+  mutable std::mutex size_cache_mutex_;
+  mutable uint64_t cached_bag_size_{0};
+  mutable std::chrono::steady_clock::time_point bag_size_cached_at_{};
   /// Kept so a new bag can be opened after stop() without reconstructing the node.
   rosbag2_storage::StorageOptions storage_options_;
   rosbag2_cpp::ConverterOptions converter_options_;

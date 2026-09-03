@@ -40,6 +40,14 @@ namespace
 {
 constexpr int kReturnSuccess = 0;
 constexpr int kReturnError = 1;
+
+/// How long a bag-size measurement stays good enough to reuse.
+///
+/// The status is published every second and this is the only field in it that costs real work.
+/// Bag size is already documented as bytes flushed rather than bytes captured, so a few seconds
+/// of staleness on top changes nothing a caller could act on -- unlike the liveness fields, which
+/// are always computed fresh.
+constexpr auto kBagSizeCacheTtl = std::chrono::seconds(3);
 }  // namespace
 
 DynamicRecorder::DynamicRecorder(const rclcpp::NodeOptions & options)
@@ -305,11 +313,12 @@ std::vector<std::string> DynamicRecorder::subscribed_topics() const
   return topics;
 }
 
-std::optional<std::string> DynamicRecorder::resolve_type(const std::string & topic_name) const
+std::optional<std::string> DynamicRecorder::resolve_type(
+  const std::string & topic_name,
+  const std::map<std::string, std::vector<std::string>> & graph) const
 {
-  const auto names_and_types = get_topic_names_and_types();
-  const auto it = names_and_types.find(topic_name);
-  if (it == names_and_types.end() || it->second.empty()) {
+  const auto it = graph.find(topic_name);
+  if (it == graph.end() || it->second.empty()) {
     return std::nullopt;
   }
   if (it->second.size() > 1) {
@@ -544,6 +553,8 @@ void DynamicRecorder::subscribe_batch(
   std::vector<std::string> & unavailable_out)
 {
   last_failure_reason_.clear();
+  // One graph query for the whole batch rather than one per topic.
+  const auto graph = get_topic_names_and_types();
   for (size_t i = 0; i < topics.size(); ++i) {
     const auto & topic_name = topics[i];
 
@@ -551,7 +562,7 @@ void DynamicRecorder::subscribe_batch(
     if (i < topic_types.size() && !topic_types[i].empty()) {
       topic_type = topic_types[i];
     } else {
-      const auto resolved = resolve_type(topic_name);
+      const auto resolved = resolve_type(topic_name, graph);
       if (!resolved.has_value()) {
         last_failure_reason_ = "cannot resolve a single type for '" + topic_name +
           "'; it is not on the graph, or publishes more than one type";
@@ -913,24 +924,39 @@ void DynamicRecorder::handle_stop(
 
 uint64_t DynamicRecorder::bag_size_bytes() const
 {
+  {
+    std::lock_guard<std::mutex> lock(size_cache_mutex_);
+    const auto now = std::chrono::steady_clock::now();
+    if (bag_size_cached_at_.time_since_epoch().count() != 0 &&
+      now - bag_size_cached_at_ < kBagSizeCacheTtl)
+    {
+      return cached_bag_size_;
+    }
+  }
+
   namespace fs = std::filesystem;
   std::error_code ec;
   const fs::path dir(uri_);
-  if (!fs::is_directory(dir, ec)) {
-    return 0;
-  }
   uint64_t total = 0;
-  for (fs::recursive_directory_iterator it(dir, ec), end; it != end; it.increment(ec)) {
-    if (ec) {
-      break;  // Report what we counted rather than failing the whole status call.
-    }
-    if (it->is_regular_file(ec)) {
-      const auto size = it->file_size(ec);
-      if (!ec) {
-        total += size;
+  if (fs::is_directory(dir, ec)) {
+    // Not recursive: a rosbag2 bag directory is flat -- some number of storage files plus
+    // metadata.yaml -- so descending buys nothing and costs a walk that grows with split count.
+    for (fs::directory_iterator it(dir, ec), end; it != end; it.increment(ec)) {
+      if (ec) {
+        break;  // Report what we counted rather than failing the whole status call.
+      }
+      if (it->is_regular_file(ec)) {
+        const auto size = it->file_size(ec);
+        if (!ec) {
+          total += size;
+        }
       }
     }
   }
+
+  std::lock_guard<std::mutex> lock(size_cache_mutex_);
+  cached_bag_size_ = total;
+  bag_size_cached_at_ = std::chrono::steady_clock::now();
   return total;
 }
 
@@ -969,8 +995,15 @@ DynamicRecorder::RecorderStatus DynamicRecorder::build_status() const
 
 void DynamicRecorder::publish_status()
 {
-  if (pub_status_) {
+  if (!pub_status_) {
+    return;
+  }
+  try {
     pub_status_->publish(build_status());
+  } catch (const std::exception & e) {
+    // stop() publishes, and stop() also runs from the destructor -- which can be after context
+    // shutdown, where publishing is invalid. Throwing from a destructor would terminate.
+    RCLCPP_DEBUG(get_logger(), "Could not publish status: %s", e.what());
   }
 }
 
@@ -999,13 +1032,20 @@ bool DynamicRecorder::record(const std::string & uri)
     std::error_code ec;
     if (fs::exists(storage_options_.uri, ec)) {
       const fs::path base(storage_options_.uri);
-      for (size_t i = 1; i < 10000; ++i) {
+      bool found = false;
+      for (size_t i = 1; i < 10000 && !found; ++i) {
         fs::path candidate = base;
         candidate += "(" + std::to_string(i) + ")";
         if (!fs::exists(candidate, ec)) {
           storage_options_.uri = candidate.generic_string();
-          break;
+          found = true;
         }
+      }
+      if (!found) {
+        last_failure_reason_ = "no free bag path near '" + base.generic_string() +
+          "'; 10000 suffixed directories already exist";
+        RCLCPP_ERROR(get_logger(), "%s", last_failure_reason_.c_str());
+        return false;
       }
     }
     uri_ = storage_options_.uri;
@@ -1036,6 +1076,12 @@ bool DynamicRecorder::record(const std::string & uri)
     }
     writer_ = std::move(writer);
     write_errors_.store(0, std::memory_order_relaxed);
+    {
+      // The new bag is empty; a cached size from the previous one would be actively wrong.
+      std::lock_guard<std::mutex> size_lock(size_cache_mutex_);
+      cached_bag_size_ = 0;
+      bag_size_cached_at_ = {};
+    }
     recording_ = true;
     recording_started_ = now();
     restore = topics_at_stop_;
