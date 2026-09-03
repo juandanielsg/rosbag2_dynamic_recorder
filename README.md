@@ -52,9 +52,19 @@ against standard rosbag2 drives this node unchanged:
 | `~/record` | Open a new bag and start again, restoring the previous topic selection. |
 | `~/get_status` | Everything a UI or CLI needs for a status line, in one round trip. |
 
-`return_code` is `0` on success, `1` when nothing was actioned or on error. The
-timestamp-scheduled forms of `record`, `resume` and `split_bagfile` are not implemented and return
-an explicit error rather than silently acting immediately.
+`return_code` is `0` on success, `1` when nothing was actioned or on error.
+
+`resume`, `split_bagfile` and `record` also accept a **future timestamp** instead of acting
+immediately:
+
+- **Node time** (`mode: 0`, and the only option for `record`) is driven by a timer, so it fires
+  even if the robot has gone quiet.
+- **Publish time** (`1`) and **receive time** (`2`) are compared against arriving messages, either
+  on any recorded topic or on `tracking_topic_name` alone. These cannot fire while no messages are
+  arriving, which is inherent to what they mean.
+
+A mode outside 0–2, or a `tracking_topic_name` nobody is recording, is rejected rather than
+accepted — a schedule keyed to a topic that is not being recorded would simply wait forever.
 
 Stopping is not a dead end: `~/record` opens a fresh bag and re-subscribes whatever was being
 recorded when you stopped. Since rosbag2 will not open over an existing bag directory, the new one

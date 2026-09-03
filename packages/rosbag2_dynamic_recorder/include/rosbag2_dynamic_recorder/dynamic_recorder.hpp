@@ -237,6 +237,36 @@ private:
   /// Register write-split and messages-lost callbacks on the writer.
   void setup_writer_events();
 
+  /// A resume or split asked for at a future timestamp rather than immediately.
+  ///
+  /// Node-time requests are driven by a one-shot timer, so they fire even on a silent robot.
+  /// Publish- and receive-time requests can only be evaluated against arriving messages, so they
+  /// are checked in the subscription callback and will not fire if the traffic stops.
+  struct ScheduledAction
+  {
+    bool active{false};
+    rcutils_time_point_value_t at_ns{0};
+    int32_t mode{0};
+    /// Empty means any topic satisfies the comparison.
+    std::string tracking_topic;
+  };
+
+  /// Fire any message-timestamp-driven schedule this message satisfies.
+  /// Called from the subscription callback before the writer lock is taken.
+  void check_scheduled(
+    const std::string & topic_name,
+    rcutils_time_point_value_t send_timestamp,
+    rcutils_time_point_value_t recv_timestamp);
+
+  /// Forget every pending schedule. A split queued against a bag that has since been closed, or
+  /// a resume queued before a stop, must not fire against the next recording.
+  void clear_scheduled();
+
+  /// Validate a requested mode and tracking topic. Returns an error code, or 0 when usable.
+  int32_t validate_schedule(
+    int32_t mode, const std::string & tracking_topic,
+    int32_t invalid_mode_code, int32_t invalid_topic_code) const;
+
   std::unique_ptr<rosbag2_cpp::Writer> writer_;
   /// Guards writer_ access and recording_. rosbag2_cpp::Writer has its own internal lock, but we
   /// need recording_ and the write call to be consistent: without this, a write can land after
@@ -302,6 +332,14 @@ private:
   std::atomic_uint64_t total_messages_lost_{0};
   std::mutex messages_lost_mutex_;
   rclcpp::TimerBase::SharedPtr messages_lost_timer_;
+
+  mutable std::mutex scheduled_mutex_;
+  ScheduledAction scheduled_resume_;
+  ScheduledAction scheduled_split_;
+  std::string scheduled_record_uri_;
+  rclcpp::TimerBase::SharedPtr resume_timer_;
+  rclcpp::TimerBase::SharedPtr split_timer_;
+  rclcpp::TimerBase::SharedPtr record_timer_;
 
   /// Reason stamped onto the next SubscriptionChangeEvent. Safe as shared state because every
   /// service handler runs in service_callback_group_, which is MutuallyExclusive: only one

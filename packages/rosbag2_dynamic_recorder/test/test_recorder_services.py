@@ -53,7 +53,7 @@ from rclpy.serialization import deserialize_message
 from rosbag2_py import ConverterOptions, SequentialReader, StorageOptions
 
 from rosbag2_dynamic_recorder_interfaces.msg import SubscriptionChangeEvent
-from rosbag2_interfaces.srv import Record, Snapshot, SplitBagfile, Stop
+from rosbag2_interfaces.srv import Pause, Record, Resume, Snapshot, SplitBagfile, Stop
 
 EVENT_TYPE = "rosbag2_dynamic_recorder_interfaces/msg/SubscriptionChangeEvent"
 SUBSCRIBED, UNSUBSCRIBED = 0, 1
@@ -254,16 +254,89 @@ def test_record_reopens_and_restores_the_topic_selection(recorder):
     assert status.uri, "a new bag should have been opened"
 
 
-def test_scheduled_operations_are_refused_not_silently_immediate(recorder):
-    """We do not implement timestamp scheduling. Accepting the field and acting immediately would
-    be worse than refusing."""
+def test_scheduled_resume_fires_on_node_time(recorder):
+    """A node-time schedule must fire from a timer, so it works on a robot with no traffic."""
     harness, _ = recorder
     from builtin_interfaces.msg import Time
 
-    future = Time(sec=2_000_000_000, nanosec=0)
-    assert harness.call(SplitBagfile, "split_bagfile", split_time=future).return_code != 0
+    harness.call(SubscribeTopics, "subscribe_topics", topics=[TOPICS[0]])
+    harness.call(Pause, "pause")
+    assert harness.status().paused is True
+
+    soon = harness.get_clock().now().nanoseconds + 3_000_000_000
+    response = harness.call(
+        Resume, "resume",
+        resume_time=Time(sec=soon // 10**9, nanosec=soon % 10**9), resume_mode=0)
+    assert response.return_code == 0, response.error_string
+    assert harness.status().paused is True, "it should not have resumed yet"
+
+    harness.spin_for(5.0)
+    assert harness.status().paused is False, "the scheduled resume did not fire"
+
+
+def test_scheduled_resume_fires_on_message_time(recorder):
+    """Receive-time mode is evaluated against arriving messages, not the clock."""
+    harness, _ = recorder
+    from builtin_interfaces.msg import Time
+
+    harness.call(SubscribeTopics, "subscribe_topics", topics=[TOPICS[0]])
+    harness.call(Pause, "pause")
+
+    soon = harness.get_clock().now().nanoseconds + 2_000_000_000
+    response = harness.call(
+        Resume, "resume",
+        resume_time=Time(sec=soon // 10**9, nanosec=soon % 10**9),
+        resume_mode=2, tracking_topic_name=TOPICS[0])
+    assert response.return_code == 0, response.error_string
+
+    harness.spin_for(5.0)
+    assert harness.status().paused is False
+
+
+def test_scheduled_split_produces_a_second_file(recorder):
+    harness, bag = recorder
+    from builtin_interfaces.msg import Time
+
+    harness.call(SubscribeTopics, "subscribe_topics", topics=[TOPICS[0]])
+    soon = harness.get_clock().now().nanoseconds + 3_000_000_000
+    response = harness.call(
+        SplitBagfile, "split_bagfile",
+        split_time=Time(sec=soon // 10**9, nanosec=soon % 10**9), split_mode=0)
+    assert response.return_code == 0, response.error_string
+    assert harness.status().bag_splits == 0, "it should not have split yet"
+
+    harness.spin_for(5.0)
+    assert harness.status().bag_splits == 1, "the scheduled split did not fire"
+
+
+def test_scheduled_record_starts_later(recorder):
+    harness, _ = recorder
+    from builtin_interfaces.msg import Time
+
     harness.call(Stop, "stop")
-    assert harness.call(Record, "record", start_time=future).return_code != 0
+    soon = harness.get_clock().now().nanoseconds + 3_000_000_000
+    response = harness.call(
+        Record, "record", start_time=Time(sec=soon // 10**9, nanosec=soon % 10**9))
+    assert response.return_code == 0, response.error_string
+    assert harness.status().recording is False, "it should not have started yet"
+
+    harness.spin_for(5.0)
+    assert harness.status().recording is True, "the scheduled recording did not start"
+
+
+def test_invalid_schedule_is_rejected(recorder):
+    """A mode we cannot honour, or a topic nobody records, would wait forever. Refuse instead."""
+    harness, _ = recorder
+    from builtin_interfaces.msg import Time
+
+    soon = Time(sec=2_000_000_000, nanosec=0)
+    bad_mode = harness.call(Resume, "resume", resume_time=soon, resume_mode=99)
+    assert bad_mode.return_code == Resume.Response.RETURN_CODE_INVALID_RESUME_MODE
+
+    bad_topic = harness.call(
+        Resume, "resume", resume_time=soon, resume_mode=2,
+        tracking_topic_name="/nobody/records/this")
+    assert bad_topic.return_code == Resume.Response.RETURN_CODE_INVALID_TRACKING_TOPIC
 
 
 def test_snapshot_without_snapshot_mode_fails_clearly(recorder):

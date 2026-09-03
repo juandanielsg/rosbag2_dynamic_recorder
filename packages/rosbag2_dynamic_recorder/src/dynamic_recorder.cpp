@@ -48,6 +48,16 @@ constexpr int kReturnError = 1;
 /// of staleness on top changes nothing a caller could act on -- unlike the liveness fields, which
 /// are always computed fresh.
 constexpr auto kBagSizeCacheTtl = std::chrono::seconds(3);
+
+// Shared by Resume and SplitBagfile: 0 = node clock, 1 = message publish time, 2 = receive time.
+constexpr int32_t kModeNodeTime = 0;
+constexpr int32_t kModePublishTime = 1;
+constexpr int32_t kModeReceiveTime = 2;
+
+rcutils_time_point_value_t to_nanoseconds(const builtin_interfaces::msg::Time & stamp)
+{
+  return static_cast<rcutils_time_point_value_t>(stamp.sec) * 1000000000LL + stamp.nanosec;
+}
 }  // namespace
 
 DynamicRecorder::DynamicRecorder(const rclcpp::NodeOptions & options)
@@ -297,6 +307,7 @@ void DynamicRecorder::stop()
     std::lock_guard<std::mutex> lock(writer_mutex_);
     writer_->close();
   }
+  clear_scheduled();
   RCLCPP_INFO(get_logger(), "Recording stopped, bag closed.");
   publish_status();
 }
@@ -464,6 +475,10 @@ bool DynamicRecorder::subscribe_topic(
         }
         per_publisher[publisher_key] = sequence;
       }
+
+      // Before the pause gate, so a scheduled resume takes effect for this very message rather
+      // than the next one, and before the writer lock, since firing takes that lock itself.
+      check_scheduled(topic_name, send_timestamp, recv_timestamp);
 
       // Checked before taking the lock: while paused this is the whole cost of a message.
       if (paused_.load()) {
@@ -843,16 +858,43 @@ void DynamicRecorder::handle_pause(
 void DynamicRecorder::handle_resume(
   const std::shared_ptr<Resume::Request> request, std::shared_ptr<Resume::Response> response)
 {
-  const bool scheduled = request->resume_time.sec != 0 || request->resume_time.nanosec != 0;
-  if (scheduled) {
-    // Timestamp-scheduled resume is not implemented yet; say so rather than resuming immediately
-    // and silently doing something other than what was asked.
-    response->return_code = Resume::Response::RETURN_CODE_RESUME_FAILED;
-    response->error_string =
-      "scheduled resume_time is not supported yet; send an empty resume_time to resume now";
+  const auto at_ns = to_nanoseconds(request->resume_time);
+  if (at_ns == 0) {
+    resume();
+    response->return_code = Resume::Response::RETURN_CODE_SUCCESS;
     return;
   }
-  resume();
+
+  const auto invalid = validate_schedule(
+    request->resume_mode, request->tracking_topic_name,
+    Resume::Response::RETURN_CODE_INVALID_RESUME_MODE,
+    Resume::Response::RETURN_CODE_INVALID_TRACKING_TOPIC);
+  if (invalid != 0) {
+    response->return_code = invalid;
+    response->error_string = invalid == Resume::Response::RETURN_CODE_INVALID_RESUME_MODE
+      ? "resume_mode must be 0 (node time), 1 (publish time) or 2 (receive time)"
+      : "tracking_topic_name '" + request->tracking_topic_name + "' is not being recorded";
+    return;
+  }
+
+  if (request->resume_mode == kModeNodeTime) {
+    const auto delta = at_ns - now().nanoseconds();
+    if (delta <= 0) {
+      resume();
+    } else {
+      // A timer rather than the message path: node-time schedules must fire on a silent robot.
+      resume_timer_ = create_wall_timer(
+        std::chrono::nanoseconds(delta),
+        [this]() {
+          resume_timer_->cancel();
+          resume();
+        },
+        service_callback_group_);
+    }
+  } else {
+    std::lock_guard<std::mutex> lock(scheduled_mutex_);
+    scheduled_resume_ = {true, at_ns, request->resume_mode, request->tracking_topic_name};
+  }
   response->return_code = Resume::Response::RETURN_CODE_SUCCESS;
 }
 
@@ -878,17 +920,51 @@ void DynamicRecorder::handle_split_bagfile(
   const std::shared_ptr<SplitBagfile::Request> request,
   std::shared_ptr<SplitBagfile::Response> response)
 {
-  const bool scheduled = request->split_time.sec != 0 || request->split_time.nanosec != 0;
-  if (scheduled) {
-    response->return_code = SplitBagfile::Response::RETURN_CODE_INVALID_SPLIT_MODE;
-    response->error_string =
-      "scheduled split_time is not supported yet; send an empty split_time to split now";
-    return;
-  }
-  if (!split_bagfile()) {
+  if (!is_recording()) {
     response->return_code = SplitBagfile::Response::RETURN_CODE_NOT_RECORDING;
     response->error_string = "not recording";
     return;
+  }
+
+  const auto at_ns = to_nanoseconds(request->split_time);
+  if (at_ns == 0) {
+    if (!split_bagfile()) {
+      response->return_code = SplitBagfile::Response::RETURN_CODE_SPLIT_FAILED;
+      response->error_string = "the writer could not split the bag";
+      return;
+    }
+    response->return_code = SplitBagfile::Response::RETURN_CODE_SUCCESS;
+    return;
+  }
+
+  const auto invalid = validate_schedule(
+    request->split_mode, request->tracking_topic_name,
+    SplitBagfile::Response::RETURN_CODE_INVALID_SPLIT_MODE,
+    SplitBagfile::Response::RETURN_CODE_INVALID_TRACKING_TOPIC);
+  if (invalid != 0) {
+    response->return_code = invalid;
+    response->error_string = invalid == SplitBagfile::Response::RETURN_CODE_INVALID_SPLIT_MODE
+      ? "split_mode must be 0 (node time), 1 (publish time) or 2 (receive time)"
+      : "tracking_topic_name '" + request->tracking_topic_name + "' is not being recorded";
+    return;
+  }
+
+  if (request->split_mode == kModeNodeTime) {
+    const auto delta = at_ns - now().nanoseconds();
+    if (delta <= 0) {
+      split_bagfile();
+    } else {
+      split_timer_ = create_wall_timer(
+        std::chrono::nanoseconds(delta),
+        [this]() {
+          split_timer_->cancel();
+          split_bagfile();
+        },
+        service_callback_group_);
+    }
+  } else {
+    std::lock_guard<std::mutex> lock(scheduled_mutex_);
+    scheduled_split_ = {true, at_ns, request->split_mode, request->tracking_topic_name};
   }
   response->return_code = SplitBagfile::Response::RETURN_CODE_SUCCESS;
 }
@@ -1107,21 +1183,43 @@ bool DynamicRecorder::record(const std::string & uri)
 void DynamicRecorder::handle_record(
   const std::shared_ptr<Record::Request> request, std::shared_ptr<Record::Response> response)
 {
-  const bool scheduled = request->start_time.sec != 0 || request->start_time.nanosec != 0;
-  if (scheduled) {
-    // Same policy as resume and split_bagfile: refuse clearly rather than accept the field and
-    // quietly do something else.
+  if (is_recording()) {
     response->return_code = kReturnError;
-    response->error_string =
-      "scheduled start_time is not supported yet; send an empty start_time to start now";
+    response->error_string = "already recording";
     return;
   }
-  const bool was_recording = is_recording();
+
+  // Record carries no mode field upstream, only a timestamp, so it is node-time by definition.
+  const auto at_ns = to_nanoseconds(request->start_time);
+  const auto delta = at_ns == 0 ? 0 : at_ns - now().nanoseconds();
+  if (delta > 0) {
+    {
+      std::lock_guard<std::mutex> lock(scheduled_mutex_);
+      scheduled_record_uri_ = request->uri;
+    }
+    record_timer_ = create_wall_timer(
+      std::chrono::nanoseconds(delta),
+      [this]() {
+        record_timer_->cancel();
+        std::string uri;
+        {
+          std::lock_guard<std::mutex> lock(scheduled_mutex_);
+          uri = scheduled_record_uri_;
+        }
+        if (!record(uri)) {
+          RCLCPP_ERROR(get_logger(), "Scheduled recording failed to start: %s",
+            last_failure_reason_.c_str());
+        }
+      },
+      service_callback_group_);
+    response->return_code = kReturnSuccess;
+    return;
+  }
+
   if (!record(request->uri)) {
     response->return_code = kReturnError;
-    response->error_string = was_recording
-      ? "already recording"
-      : (last_failure_reason_.empty() ? "could not start recording" : last_failure_reason_);
+    response->error_string =
+      last_failure_reason_.empty() ? "could not start recording" : last_failure_reason_;
     return;
   }
   response->return_code = kReturnSuccess;
@@ -1202,6 +1300,80 @@ void DynamicRecorder::handle_get_profiles(
     response->profiles.push_back(profile);
   }
   response->active_profile = active_profile();
+}
+
+int32_t DynamicRecorder::validate_schedule(
+  int32_t mode, const std::string & tracking_topic,
+  int32_t invalid_mode_code, int32_t invalid_topic_code) const
+{
+  if (mode != kModeNodeTime && mode != kModePublishTime && mode != kModeReceiveTime) {
+    return invalid_mode_code;
+  }
+  if (!tracking_topic.empty()) {
+    // A schedule keyed to a topic nobody is recording would wait forever, so refuse it rather
+    // than accept a request that cannot come true.
+    const auto current = subscribed_topics();
+    if (std::find(current.begin(), current.end(), tracking_topic) == current.end()) {
+      return invalid_topic_code;
+    }
+  }
+  return 0;
+}
+
+void DynamicRecorder::check_scheduled(
+  const std::string & topic_name,
+  rcutils_time_point_value_t send_timestamp,
+  rcutils_time_point_value_t recv_timestamp)
+{
+  bool fire_resume = false;
+  bool fire_split = false;
+  {
+    std::lock_guard<std::mutex> lock(scheduled_mutex_);
+    const auto satisfied = [&](ScheduledAction & action) {
+        if (!action.active || action.mode == kModeNodeTime) {
+          return false;
+        }
+        if (!action.tracking_topic.empty() && action.tracking_topic != topic_name) {
+          return false;
+        }
+        const auto stamp =
+          action.mode == kModePublishTime ? send_timestamp : recv_timestamp;
+        // A zero stamp means the middleware did not supply one; comparing against it would fire
+        // immediately and for the wrong reason.
+        if (stamp == 0 || stamp < action.at_ns) {
+          return false;
+        }
+        action.active = false;
+        return true;
+      };
+    fire_resume = satisfied(scheduled_resume_);
+    fire_split = satisfied(scheduled_split_);
+  }
+
+  // Outside the lock: both take the writer lock, which this callback is about to take as well.
+  if (fire_resume) {
+    RCLCPP_INFO(get_logger(), "Scheduled resume reached on '%s'", topic_name.c_str());
+    resume();
+  }
+  if (fire_split) {
+    RCLCPP_INFO(get_logger(), "Scheduled split reached on '%s'", topic_name.c_str());
+    split_bagfile();
+  }
+}
+
+void DynamicRecorder::clear_scheduled()
+{
+  {
+    std::lock_guard<std::mutex> lock(scheduled_mutex_);
+    scheduled_resume_ = {};
+    scheduled_split_ = {};
+  }
+  if (resume_timer_) {
+    resume_timer_->cancel();
+  }
+  if (split_timer_) {
+    split_timer_->cancel();
+  }
 }
 
 }  // namespace rosbag2_dynamic_recorder
