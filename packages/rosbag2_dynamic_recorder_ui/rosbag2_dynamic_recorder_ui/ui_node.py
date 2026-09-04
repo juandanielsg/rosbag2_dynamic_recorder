@@ -48,6 +48,11 @@ from rosbag2_dynamic_recorder_interfaces.srv import (
 )
 from rosbag2_interfaces.srv import Pause, Record, Resume, Snapshot, SplitBagfile, Stop
 
+#: How many events to keep. The feed shows a handful; the timeline needs the rest, and the
+#: recorder retains only ten for late joiners, so anything earlier than this page simply was
+#: not observed -- which the timeline says rather than guesses at.
+HISTORY_LIMIT = 400
+
 #: Topics that are never useful to record and only clutter the picker.
 HIDDEN_TOPICS = {"/parameter_events", "/rosout"}
 
@@ -104,6 +109,11 @@ def build_state(status, age, recorder, available_topics, events):
         "paused": bool(status.paused),
         "snapshot_mode": bool(status.snapshot_mode),
         "elapsed_seconds": status.elapsed_seconds,
+        # Epoch seconds on the recorder's clock, which is also what event stamps use. The
+        # timeline is drawn entirely in those terms so the browser's clock never enters into
+        # it.
+        "recording_started": (
+            status.recording_started.sec + status.recording_started.nanosec / 1e9),
         "subscribed_topics": list(status.subscribed_topics),
         "active_profile": status.active_profile,
         "available_topics": available_topics,
@@ -197,7 +207,7 @@ class RecorderUi(Node):
             f"UI on http://localhost:{self.port}  (controlling {self.recorder})"
         )
         if self.bind not in ("127.0.0.1", "localhost", "::1"):
-            self.get_logger().warn(
+            self.get_logger().warning(
                 f"UI is bound to {self.bind}, so anyone who can reach this machine on port "
                 f"{self.port} can stop the recording or change what is recorded. There is no "
                 "authentication. Use bind:=127.0.0.1 unless the network is trusted."
@@ -256,7 +266,7 @@ class RecorderUi(Node):
                     "stamp": msg.stamp.sec + msg.stamp.nanosec / 1e9,
                 }
             )
-            del self._events[:-50]
+            del self._events[:-HISTORY_LIMIT]
 
     def _on_pause_event(self, msg):
         with self._lock:
@@ -271,7 +281,7 @@ class RecorderUi(Node):
                     "stamp": msg.stamp.sec + msg.stamp.nanosec / 1e9,
                 }
             )
-            del self._events[:-50]
+            del self._events[:-HISTORY_LIMIT]
 
     def available_topics(self):
         return sorted(
@@ -286,10 +296,13 @@ class RecorderUi(Node):
             status = self._status
             age = time.monotonic() - self._status_stamp if status else None
             events = recent_events(self._events)
+            history = list(self._events)
         with self._lock:
             profiles = list(self._profiles)
         state = build_state(status, age, self.recorder, self.available_topics(), events)
         state["profiles"] = profiles
+        # Oldest first: the timeline walks it forward, opening and closing spans.
+        state["history"] = sorted(history, key=lambda event: event["stamp"])
         return state
 
     def call(self, action, payload):
@@ -304,6 +317,11 @@ class RecorderUi(Node):
             request.topics = list(payload.get("topics", []))
         if hasattr(request, "name"):
             request.name = str(payload.get("name", ""))
+        # Pattern selection, for the services that take it. Sending a regex instead of an
+        # enumerated list is the difference between one call and ticking sixty boxes.
+        if hasattr(request, "regex"):
+            request.regex = str(payload.get("regex", ""))
+            request.exclude_regex = str(payload.get("exclude_regex", ""))
 
         future = client.call_async(request)
         deadline = time.monotonic() + 10.0

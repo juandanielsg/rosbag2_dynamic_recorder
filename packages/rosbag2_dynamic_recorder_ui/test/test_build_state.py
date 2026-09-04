@@ -35,6 +35,7 @@ def _status(**overrides):
         paused=False,
         snapshot_mode=False,
         elapsed_seconds=12.5,
+        recording_started=SimpleNamespace(sec=1788500000, nanosec=500000000),
         subscribed_topics=["/a", "/b"],
         active_profile="",
         messages_written=100,
@@ -128,3 +129,20 @@ def test_a_pause_event_carries_no_topic():
     (event,) = recent_events([_event(1.0, kind="pause", action="paused", topic="")])
     assert event["kind"] == "pause"
     assert event["topic"] == ""
+
+
+def test_the_timeline_axis_comes_from_the_recorder_clock():
+    """Both ends of the axis have to be the recorder's, not the browser's.
+
+    Event stamps are on the recorder's clock; mixing in the viewer's would put every bar in the
+    wrong place on a machine whose clock differs even slightly.
+    """
+    state = _state(_status())
+    assert state["recording_started"] == 1788500000.5
+    assert state["elapsed_seconds"] == 12.5
+
+
+def test_a_disconnected_page_gets_no_axis_to_draw_on():
+    """Without a status there is no session to place events against, so claim nothing."""
+    state = build_state(None, None, "/rec", ["/a"], [])
+    assert "recording_started" not in state

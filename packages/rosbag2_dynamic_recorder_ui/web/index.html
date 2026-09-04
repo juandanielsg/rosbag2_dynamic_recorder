@@ -9,11 +9,13 @@
     color-scheme: light dark;
     --bg: #f6f7f9; --card: #fff; --fg: #14171a; --muted: #5b6570; --line: #dfe3e8;
     --ok: #17803d; --warn: #9a6700; --bad: #b42318; --idle: #5b6570; --accent: #1f6feb;
+    --track: #e6e9ee; --band: rgba(154, 103, 0, .16);
   }
   @media (prefers-color-scheme: dark) {
     :root {
       --bg: #14171a; --card: #1c2024; --fg: #e8eaed; --muted: #9aa4af; --line: #2c3238;
       --ok: #3fb950; --warn: #d29922; --bad: #f85149; --idle: #9aa4af; --accent: #58a6ff;
+      --track: #262c33; --band: rgba(210, 153, 34, .18);
     }
   }
   * { box-sizing: border-box; }
@@ -75,6 +77,39 @@
   .ev-all { font-style: italic; }
   .reason { color: var(--muted); margin-left: auto; font-size: 12px; }
   .empty { color: var(--muted); font-size: 13px; }
+  /* Timeline: one row per topic that has ever been recorded, drawn on the recorder's clock. */
+  .tl { display: grid; grid-template-columns: minmax(96px, max-content) 1fr;
+        gap: 4px 12px; align-items: center; }
+  .tl-name { font-size: 12.5px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+             font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+  .tl-track { position: relative; height: 16px; background: var(--track); border-radius: 3px;
+              overflow: hidden; }
+  .tl-seg { position: absolute; top: 0; bottom: 0; background: var(--accent); opacity: .85; }
+  .tl-band { position: absolute; top: 0; bottom: 0; background: var(--band); }
+  .tl-unseen { position: absolute; top: 0; bottom: 0; background: repeating-linear-gradient(
+                 -45deg, var(--line) 0 4px, transparent 4px 8px); }
+  .tl-axis { grid-column: 2; display: flex; justify-content: space-between; color: var(--muted);
+             font-size: 11px; margin-top: 4px; font-variant-numeric: tabular-nums; }
+  .legend { display: flex; flex-wrap: wrap; gap: 14px; margin-top: 14px; font-size: 12px;
+            color: var(--muted); }
+  .legend span { display: inline-flex; align-items: center; gap: 6px; }
+  .swatch { width: 22px; height: 10px; border-radius: 2px; display: inline-block; }
+
+  /* Filter bar over the topic picker. */
+  .filterbar { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 12px; }
+  .filterbar input[type="search"] { flex: 1 1 200px; min-width: 0; font: inherit; padding: 7px 11px;
+      border-radius: 8px; border: 1px solid var(--line); background: var(--bg); color: var(--fg); }
+  .filterbar input[type="search"].bad { border-color: var(--bad); }
+  .seg { display: inline-flex; border: 1px solid var(--line); border-radius: 8px; overflow: hidden; }
+  .seg button { border: 0; border-radius: 0; padding: 7px 12px; font-size: 13px; }
+  .seg button + button { border-left: 1px solid var(--line); }
+  .seg button[aria-pressed="true"] { background: var(--accent); border-color: var(--accent);
+                                     color: #fff; }
+  .topics { max-height: 300px; overflow-y: auto; }
+  .topics mark { background: transparent; color: var(--accent); font-weight: 600; }
+  .hint { color: var(--muted); font-size: 12.5px; margin-top: 10px; }
+  .hint.bad { color: var(--bad); }
+
   #toast { position: fixed; left: 50%; transform: translateX(-50%); bottom: 20px;
            background: var(--card); border: 1px solid var(--line); border-radius: 8px;
            padding: 10px 16px; font-size: 14px; box-shadow: 0 4px 16px rgba(0,0,0,.18); }
@@ -113,13 +148,34 @@
     <div class="pending" id="profile-note"></div>
   </div>
 
+  <div class="card" id="timeline-card" hidden>
+    <h2>Recording timeline</h2>
+    <div class="tl" id="tl"></div>
+    <div class="legend">
+      <span><i class="swatch" style="background:var(--accent);opacity:.85"></i> recorded</span>
+      <span><i class="swatch" style="background:var(--track)"></i> not recorded</span>
+      <span><i class="swatch" style="background:var(--band)"></i> paused, every topic at once</span>
+    </div>
+    <p class="hint" id="tl-note"></p>
+  </div>
+
   <div class="card">
     <h2>Topics</h2>
+    <div class="filterbar">
+      <input type="search" id="filter" placeholder="Filter topics…" autocomplete="off"
+             aria-label="Filter topics">
+      <div class="seg" role="group" aria-label="Filter mode">
+        <button id="mode-text" aria-pressed="true">Text</button>
+        <button id="mode-regex" aria-pressed="false">Regex</button>
+      </div>
+      <button id="btn-match" disabled>Record all matching</button>
+    </div>
     <ul class="topics" id="topics"><li class="empty">Waiting for topics…</li></ul>
     <div class="apply-row">
       <button class="primary" id="btn-apply" disabled>Apply changes</button>
       <span class="pending" id="pending"></span>
     </div>
+    <p class="hint" id="filter-hint"></p>
   </div>
 
   <div class="card">
@@ -143,6 +199,14 @@ let busy = false;
 
 const $ = (id) => document.getElementById(id);
 const fmtInt = (n) => n.toLocaleString();
+const esc = (t) => t.replace(/[&<>"]/g,
+  (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+
+// mm:ss, so the axis ticks line up as a column of equal-width labels.
+function clock(seconds) {
+  const whole = Math.max(0, Math.round(seconds));
+  return `${Math.floor(whole / 60)}:${String(whole % 60).padStart(2, "0")}`;
+}
 
 function fmtDuration(s) {
   s = Math.floor(s || 0);
@@ -226,13 +290,23 @@ function renderTopics(s) {
 
   if (!list.length) {
     $("topics").innerHTML = '<li class="empty">No topics are being published yet.</li>';
+    renderFilterHint(s, 0, 0, matcher());
     return;
   }
-  $("topics").innerHTML = list.map((t) => {
+  const m = matcher();
+  const shown = list.filter((t) => m.test(t));
+  renderFilterHint(s, list.length, shown.length, m);
+
+  if (!shown.length) {
+    $("topics").innerHTML =
+      '<li class="empty">Nothing matches that filter.</li>';
+    return;
+  }
+  $("topics").innerHTML = shown.map((t) => {
     const off = !s.available_topics.includes(t);
     return `<li><label>
-      <input type="checkbox" data-topic="${t}" ${checked.has(t) ? "checked" : ""}>
-      <span class="name">${t}</span>
+      <input type="checkbox" data-topic="${esc(t)}" ${checked.has(t) ? "checked" : ""}>
+      <span class="name">${highlighted(t, m.mark)}</span>
       ${off ? '<span class="tag">publisher gone</span>' : ""}
     </label></li>`;
   }).join("");
@@ -273,8 +347,7 @@ function renderProfiles(s) {
   $("profiles").innerHTML = list.map((p) => {
     const on = p.name === s.active_profile;
     return `<button class="${on ? "active" : ""}" data-profile="${p.name}"
-      title="${p.topics.join("
-")}" ${on || !s.recording ? "disabled" : ""}>${p.name}</button>`;
+      title="${p.topics.join("\n")}" ${on || !s.recording ? "disabled" : ""}>${p.name}</button>`;
   }).join("");
 
   for (const btn of $("profiles").querySelectorAll("button[data-profile]")) {
@@ -286,6 +359,152 @@ function renderProfiles(s) {
   $("profile-note").textContent = s.active_profile
     ? `Recording the "${s.active_profile}" profile.`
     : "The current selection does not match a profile.";
+}
+
+// --- filter over the topic picker -------------------------------------------
+// Text mode narrows the list locally. Regex mode does the same, and additionally lets the pattern
+// be handed to the recorder as one set_topics call instead of ticking boxes.
+let filterMode = "text";
+
+function matcher() {
+  const query = $("filter").value.trim();
+  if (!query) return { query, test: () => true, ok: true, mark: null };
+  if (filterMode === "text") {
+    const q = query.toLowerCase();
+    return { query, test: (n) => n.toLowerCase().includes(q), ok: true, mark: q };
+  }
+  try {
+    const re = new RegExp(query);
+    return { query, test: (n) => re.test(n), ok: true, mark: re };
+  } catch (err) {
+    // Show everything rather than nothing: a half-typed expression should not look like a
+    // pattern that legitimately matched no topics, which is the same distinction the recorder
+    // makes when it refuses an invalid one.
+    return { query, test: () => true, ok: false, mark: null };
+  }
+}
+
+function highlighted(name, mark) {
+  if (!mark) return esc(name);
+  const re = mark instanceof RegExp
+    ? mark : new RegExp(mark.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "i");
+  const hit = name.match(re);
+  if (!hit || !hit[0]) return esc(name);
+  const at = name.indexOf(hit[0]);
+  return esc(name.slice(0, at)) + "<mark>" + esc(hit[0]) + "</mark>" +
+         esc(name.slice(at + hit[0].length));
+}
+
+function renderFilterHint(s, total, shown, m) {
+  const hint = $("filter-hint");
+  hint.classList.toggle("bad", !m.ok);
+  const canMatch = filterMode === "regex" && m.query && m.ok && shown > 0 && s.recording;
+  $("btn-match").disabled = !canMatch;
+  $("btn-match").textContent = canMatch
+    ? `Record all ${shown} matching` : "Record all matching";
+
+  if (!m.ok) { hint.textContent = "Not a valid regular expression."; return; }
+  if (!m.query) { hint.textContent = ""; return; }
+  hint.textContent = filterMode === "regex"
+    ? `Sent as set_topics {regex: "${m.query}"} — one call, nothing to enumerate.`
+    : `Showing ${shown} of ${total}. Switch to Regex to send the pattern to the recorder.`;
+}
+
+// --- timeline ----------------------------------------------------------------
+function renderTimeline(s) {
+  const card = $("timeline-card");
+  const history = s.history || [];
+  const span = s.connected ? s.elapsed_seconds : 0;
+  if (!s.connected || !history.length || !(span > 0)) { card.hidden = true; return; }
+
+  const t0 = s.recording_started;
+  const t1 = t0 + span;
+  // The recorder retains only ten events for a client that connects late, so anything before the
+  // oldest one we hold was simply not observed. The chart says so rather than drawing a bar it
+  // cannot vouch for -- the same rule as reporting unknown instead of zero.
+  const seenFrom = Math.max(t0, Math.min(history[0].stamp, t1));
+
+  const spans = new Map();
+  const open = new Map();
+  const pauses = [];
+  let pausedAt = null;
+  const add = (topic, from, to) => {
+    if (!(to > from)) return;
+    if (!spans.has(topic)) spans.set(topic, []);
+    spans.get(topic).push([from, to]);
+  };
+
+  for (const e of history) {
+    if (e.kind === "pause") {
+      if (e.action === "paused") { if (pausedAt === null) pausedAt = e.stamp; }
+      else if (pausedAt !== null) { pauses.push([pausedAt, e.stamp]); pausedAt = null; }
+      continue;
+    }
+    if (e.action === "subscribed") {
+      if (!open.has(e.topic)) open.set(e.topic, e.stamp);
+    } else {
+      add(e.topic, open.has(e.topic) ? open.get(e.topic) : seenFrom, e.stamp);
+      open.delete(e.topic);
+    }
+  }
+  if (pausedAt !== null) pauses.push([pausedAt, t1]);
+  for (const [topic, from] of open) add(topic, from, t1);
+  // Recorded now but never announced within the history we hold: it started before we were
+  // watching, so its bar begins where our knowledge does.
+  for (const topic of s.subscribed_topics) if (!spans.has(topic)) add(topic, seenFrom, t1);
+
+  const rows = [...spans.keys()].sort();
+  if (!rows.length) { card.hidden = true; return; }
+
+  const at = (t) => ((t - t0) / span) * 100;
+  const tl = $("tl");
+  tl.textContent = "";
+  for (const topic of rows) {
+    const name = document.createElement("div");
+    name.className = "tl-name";
+    name.textContent = topic;
+    name.title = topic;
+    const track = document.createElement("div");
+    track.className = "tl-track";
+    if (seenFrom > t0 + 0.5) {
+      const unseen = document.createElement("div");
+      unseen.className = "tl-unseen";
+      unseen.style.left = "0%";
+      unseen.style.width = at(seenFrom) + "%";
+      track.appendChild(unseen);
+    }
+    for (const [from, to] of spans.get(topic)) {
+      const seg = document.createElement("div");
+      seg.className = "tl-seg";
+      seg.style.left = at(from) + "%";
+      seg.style.width = (at(to) - at(from)) + "%";
+      track.appendChild(seg);
+    }
+    for (const [from, to] of pauses) {
+      const band = document.createElement("div");
+      band.className = "tl-band";
+      band.style.left = at(from) + "%";
+      band.style.width = (at(to) - at(from)) + "%";
+      band.title = "paused";
+      track.appendChild(band);
+    }
+    tl.append(name, track);
+  }
+
+  const axis = document.createElement("div");
+  axis.className = "tl-axis";
+  for (const f of [0, 0.25, 0.5, 0.75, 1]) {
+    const tick = document.createElement("span");
+    tick.textContent = clock(f * span);
+    axis.appendChild(tick);
+  }
+  tl.appendChild(axis);
+
+  $("tl-note").textContent = seenFrom > t0 + 0.5
+    ? "Hatched: before this page connected. The recorder keeps only its ten most recent events " +
+      "for a client that joins late, so what happened earlier was not observed."
+    : "";
+  card.hidden = false;
 }
 
 function renderEvents(s) {
@@ -366,6 +585,7 @@ function render(s) {
   renderStats(s);
   renderProfiles(s);
   renderTopics(s);
+  renderTimeline(s);
   renderEvents(s);
   renderDetail(s);
 }
@@ -399,6 +619,27 @@ async function poll() {
     $("dot").className = "dot bad";
   }
 }
+
+$("filter").addEventListener("input", () => { if (state) renderTopics(state); });
+for (const [id, mode] of [["mode-text", "text"], ["mode-regex", "regex"]]) {
+  $(id).onclick = () => {
+    filterMode = mode;
+    $("mode-text").setAttribute("aria-pressed", String(filterMode === "text"));
+    $("mode-regex").setAttribute("aria-pressed", String(filterMode === "regex"));
+    if (state) renderTopics(state);
+  };
+}
+$("btn-match").onclick = async () => {
+  const m = matcher();
+  if (!m.ok || !m.query) return;
+  // set_topics, not subscribe_topics: the button says "record all matching", and matching is
+  // the whole selection. Topics in both the old and new sets are never torn down.
+  const out = await act("set_topics", { topics: [], regex: m.query });
+  if (out.ok) {
+    pending = null;
+    toast(`Recording ${(out.subscribed_topics || []).length} topics matching that pattern.`);
+  }
+};
 
 $("btn-record").onclick = async () => {
   const out = await act("record");

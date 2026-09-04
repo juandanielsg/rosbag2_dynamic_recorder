@@ -302,6 +302,13 @@ Then open **http://localhost:8088**.
 Tick a topic to start recording it, untick to stop. Topics you did not touch keep recording
 without a gap. Pause, starting a new file, and stopping are buttons.
 
+The **topic list has a filter**, with a regex mode that sends the pattern to the recorder as a
+single `set_topics` call rather than ticking boxes one at a time. The **recording timeline**
+draws one bar per topic showing when it was actually being recorded, with pauses as a band
+across all of them — built from the events the recorder already publishes, and the one view a
+stock recorder cannot produce, since every boundary on it would otherwise have been a separate
+file. Anything from before the page connected is hatched rather than guessed at.
+
 **Recent changes** shows both event streams merged: topic changes by name, and pauses as *all
 topics*, because that is what a pause affects. They are ordered by the recorder's own timestamps
 rather than by arrival, since the two come in on separate subscriptions — so a topic change made
