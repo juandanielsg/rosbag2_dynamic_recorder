@@ -17,6 +17,7 @@
 #include <algorithm>
 #include <filesystem>
 #include <memory>
+#include <regex>
 #include <string>
 #include <unordered_set>
 #include <utility>
@@ -69,6 +70,7 @@ DynamicRecorder::DynamicRecorder(const rclcpp::NodeOptions & options)
   storage_id_ = storage_id;
   serialization_format_ = declare_parameter<std::string>("serialization_format", "cdr");
   record_subscription_events_ = declare_parameter<bool>("record_subscription_events", true);
+  record_pause_events_ = declare_parameter<bool>("record_pause_events", true);
   snapshot_mode_ = declare_parameter<bool>("snapshot_mode", false);
   const auto max_cache_size = declare_parameter<int64_t>("max_cache_size", 100 * 1024 * 1024);
   const auto messages_lost_report_period_s =
@@ -227,6 +229,7 @@ DynamicRecorder::DynamicRecorder(const rclcpp::NodeOptions & options)
   const auto event_qos = rclcpp::QoS(10).transient_local();
   pub_subscription_change_ =
     create_publisher<SubscriptionChangeEvent>("~/events/subscription_change", event_qos);
+  pub_pause_ = create_publisher<PauseEvent>("~/events/pause", event_qos);
   pub_write_split_ = create_publisher<WriteSplitEvent>("~/events/write_split", event_qos);
   pub_messages_lost_ = create_publisher<MessagesLostEvent>("~/events/messages_lost", rclcpp::QoS(10));
 
@@ -265,6 +268,10 @@ DynamicRecorder::DynamicRecorder(const rclcpp::NodeOptions & options)
       },
       service_callback_group_);
   }
+
+  // Before the initial subscriptions, so a bag started with start_paused opens with the reason
+  // its head is empty rather than with channels that appear to fail immediately.
+  emit_initial_pause_state();
 
   if (!initial_topics.empty()) {
     std::vector<std::string> subscribed;
@@ -561,6 +568,84 @@ bool DynamicRecorder::unsubscribe_topic(const std::string & topic_name)
   return true;
 }
 
+std::vector<std::string> DynamicRecorder::patternable_graph_topics() const
+{
+  const std::string own_prefix = std::string(get_fully_qualified_name()) + "/";
+  std::vector<std::string> out;
+  for (const auto & [name, types] : get_topic_names_and_types()) {
+    (void)types;
+    // Never let a pattern pull in our own topics. The event channels are written into the bag
+    // directly already, so subscribing to them would record every event twice and make the
+    // provenance harder to read rather than easier -- the opposite of what they are for.
+    if (name.rfind(own_prefix, 0) == 0) {
+      continue;
+    }
+    // ROS 2 marks a topic hidden with a name token starting in an underscore, and stock
+    // `ros2 bag record` leaves those out by default. A pattern should not be the thing that
+    // sneaks them in.
+    if (name.find("/_") != std::string::npos) {
+      continue;
+    }
+    out.push_back(name);
+  }
+  std::sort(out.begin(), out.end());
+  return out;
+}
+
+bool DynamicRecorder::resolve_selection(
+  const std::vector<std::string> & requested_topics,
+  const std::vector<std::string> & requested_types,
+  const std::string & pattern, const std::string & exclude,
+  const std::vector<std::string> & candidates,
+  std::vector<std::string> & topics_out, std::vector<std::string> & types_out,
+  std::string & error_out) const
+{
+  topics_out = requested_topics;
+  types_out = requested_types;
+  // Keep the two the same length so the index-based type lookup in subscribe_batch stays valid
+  // once matches are appended with no type of their own.
+  types_out.resize(topics_out.size());
+
+  if (pattern.empty() && exclude.empty()) {
+    return true;
+  }
+
+  try {
+    if (!pattern.empty()) {
+      const std::regex include_re(pattern);
+      const std::unordered_set<std::string> already(topics_out.begin(), topics_out.end());
+      for (const auto & name : candidates) {
+        // regex_search, not regex_match: "camera" should find "/robot/camera/image", which is
+        // how stock `ros2 bag record -e` behaves and therefore what people will expect.
+        if (already.count(name) == 0 && std::regex_search(name, include_re)) {
+          topics_out.push_back(name);
+          types_out.push_back("");
+        }
+      }
+    }
+
+    if (!exclude.empty()) {
+      const std::regex exclude_re(exclude);
+      std::vector<std::string> kept_topics;
+      std::vector<std::string> kept_types;
+      for (size_t i = 0; i < topics_out.size(); ++i) {
+        if (!std::regex_search(topics_out[i], exclude_re)) {
+          kept_topics.push_back(topics_out[i]);
+          kept_types.push_back(types_out[i]);
+        }
+      }
+      topics_out = std::move(kept_topics);
+      types_out = std::move(kept_types);
+    }
+  } catch (const std::regex_error & e) {
+    // Refused with the reason rather than quietly matching nothing, which would look identical
+    // to a pattern that simply found no topics.
+    error_out = std::string("invalid regular expression: ") + e.what();
+    return false;
+  }
+  return true;
+}
+
 void DynamicRecorder::subscribe_batch(
   const std::vector<std::string> & topics,
   const std::vector<std::string> & topic_types,
@@ -616,13 +701,33 @@ void DynamicRecorder::handle_subscribe_topics(
     return;
   }
 
-  subscribe_batch(
-    request->topics, request->topic_types,
-    response->subscribed_topics, response->unavailable_topics);
+  std::vector<std::string> topics;
+  std::vector<std::string> types;
+  std::string selection_error;
+  if (!resolve_selection(
+      request->topics, request->topic_types, request->regex, request->exclude_regex,
+      patternable_graph_topics(), topics, types, selection_error))
+  {
+    response->return_code = kReturnError;
+    response->error_string = selection_error;
+    return;
+  }
+
+  // A pattern that matches nothing is refused rather than reported as a quiet success. Subscribe
+  // exists to add topics, so adding none is a request that was not met -- and the overwhelmingly
+  // likely cause is a typo in the expression, which a success would hide.
+  if (topics.empty() && !request->regex.empty()) {
+    response->return_code = kReturnError;
+    response->error_string =
+      "regex '" + request->regex + "' matched no topics on the graph";
+    return;
+  }
+
+  subscribe_batch(topics, types, response->subscribed_topics, response->unavailable_topics);
 
   // Nothing subscribed is reported as a failure so the caller notices, but an empty request is
   // not an error.
-  if (response->subscribed_topics.empty() && !request->topics.empty()) {
+  if (response->subscribed_topics.empty() && !topics.empty()) {
     response->return_code = kReturnError;
     response->error_string = last_failure_reason_.empty()
       ? "none of the requested topics could be subscribed"
@@ -642,7 +747,23 @@ void DynamicRecorder::handle_unsubscribe_topics(
   std::shared_ptr<UnsubscribeTopics::Response> response)
 {
   current_reason_ = "service:unsubscribe_topics";
-  for (const auto & topic_name : request->topics) {
+
+  std::vector<std::string> topics;
+  std::vector<std::string> types;
+  std::string selection_error;
+  // Candidates are what is being recorded, not the graph: dropping a topic only means anything
+  // for one already subscribed, and matching the graph would silently do nothing for a topic
+  // that has since left it.
+  if (!resolve_selection(
+      request->topics, {}, request->regex, request->exclude_regex,
+      subscribed_topics(), topics, types, selection_error))
+  {
+    response->return_code = kReturnError;
+    response->error_string = selection_error;
+    return;
+  }
+
+  for (const auto & topic_name : topics) {
     if (unsubscribe_topic(topic_name)) {
       response->unsubscribed_topics.push_back(topic_name);
     } else {
@@ -650,7 +771,7 @@ void DynamicRecorder::handle_unsubscribe_topics(
     }
   }
 
-  if (response->unsubscribed_topics.empty() && !request->topics.empty()) {
+  if (response->unsubscribed_topics.empty() && !topics.empty()) {
     response->return_code = kReturnError;
     response->error_string = "none of the requested topics were subscribed";
   } else {
@@ -679,7 +800,22 @@ void DynamicRecorder::handle_set_topics(
     return;
   }
 
-  const std::unordered_set<std::string> desired(request->topics.begin(), request->topics.end());
+  std::vector<std::string> topics;
+  std::vector<std::string> types;
+  std::string selection_error;
+  if (!resolve_selection(
+      request->topics, request->topic_types, request->regex, request->exclude_regex,
+      patternable_graph_topics(), topics, types, selection_error))
+  {
+    response->return_code = kReturnError;
+    response->error_string = selection_error;
+    return;
+  }
+  // Unlike subscribe, an empty result is NOT an error here: set_topics with nothing is the
+  // documented way to stop recording every topic without closing the bag, and a pattern that
+  // matches nothing is the same request arrived at differently.
+
+  const std::unordered_set<std::string> desired(topics.begin(), topics.end());
 
   // Drop first, then add. Topics in both sets are never touched, which is the whole point:
   // switching profiles must not interrupt the topics common to both.
@@ -690,8 +826,7 @@ void DynamicRecorder::handle_set_topics(
   }
 
   std::vector<std::string> subscribed;
-  subscribe_batch(
-    request->topics, request->topic_types, subscribed, response->unavailable_topics);
+  subscribe_batch(topics, types, subscribed, response->unavailable_topics);
 
   response->subscribed_topics = subscribed_topics();
   response->return_code = kReturnSuccess;
@@ -755,13 +890,54 @@ void DynamicRecorder::emit_subscription_change(
 
   // Write the event into the bag too. This is the point of the whole mechanism: a channel that
   // stops mid-bag is otherwise indistinguishable from lost data.
-  const std::string event_topic = pub_subscription_change_->get_topic_name();
-  const std::string event_type = "rosbag2_dynamic_recorder_interfaces/msg/SubscriptionChangeEvent";
-
   rclcpp::SerializedMessage serialized;
   subscription_change_serialization_.serialize_message(&event, &serialized);
-  auto serialized_ptr = std::make_shared<const rclcpp::SerializedMessage>(std::move(serialized));
+  write_event_to_bag(
+    pub_subscription_change_->get_topic_name(),
+    "rosbag2_dynamic_recorder_interfaces/msg/SubscriptionChangeEvent",
+    std::make_shared<const rclcpp::SerializedMessage>(std::move(serialized)),
+    event.stamp);
+}
 
+void DynamicRecorder::emit_pause_event(uint8_t action, const std::string & reason)
+{
+  PauseEvent event;
+  event.stamp = now();
+  event.action = action;
+  event.reason = reason;
+  event.node_name = get_fully_qualified_name();
+
+  if (pub_pause_) {
+    pub_pause_->publish(event);
+  }
+  if (!record_pause_events_ || !pub_pause_) {
+    return;
+  }
+
+  // A pause leaves a hole in every topic at once, which is exactly what a crash, a network fault
+  // or the stall in notes/recording-stall.md also look like. Without this the bag cannot tell
+  // them apart.
+  rclcpp::SerializedMessage serialized;
+  pause_serialization_.serialize_message(&event, &serialized);
+  write_event_to_bag(
+    pub_pause_->get_topic_name(),
+    "rosbag2_dynamic_recorder_interfaces/msg/PauseEvent",
+    std::make_shared<const rclcpp::SerializedMessage>(std::move(serialized)),
+    event.stamp);
+}
+
+void DynamicRecorder::emit_initial_pause_state()
+{
+  if (paused_.load()) {
+    emit_pause_event(PauseEvent::PAUSED, "startup");
+  }
+}
+
+void DynamicRecorder::write_event_to_bag(
+  const std::string & event_topic, const std::string & event_type,
+  std::shared_ptr<const rclcpp::SerializedMessage> serialized,
+  const builtin_interfaces::msg::Time & stamp)
+{
   std::lock_guard<std::mutex> lock(writer_mutex_);
   if (!recording_) {
     return;
@@ -774,33 +950,41 @@ void DynamicRecorder::emit_subscription_change(
       known_channels_.emplace(event_topic, event_type);
     }
   } catch (const std::exception & e) {
-    RCLCPP_ERROR(get_logger(), "Could not create the event channel: %s", e.what());
+    RCLCPP_ERROR(get_logger(), "Could not create the event channel '%s': %s",
+      event_topic.c_str(), e.what());
     return;
   }
-  const auto stamp =
-    static_cast<rcutils_time_point_value_t>(event.stamp.sec) * 1000000000LL + event.stamp.nanosec;
-  // Deliberately not gated on paused_: a topic change while paused still has to be explicable.
+  const auto stamp_ns =
+    static_cast<rcutils_time_point_value_t>(stamp.sec) * 1000000000LL + stamp.nanosec;
+  // Deliberately not gated on paused_: a topic change while paused still has to be explicable,
+  // and an event explaining a pause obviously cannot be suppressed by that same pause.
   try {
-    writer_->write(serialized_ptr, event_topic, event_type, stamp, stamp);
+    writer_->write(serialized, event_topic, event_type, stamp_ns, stamp_ns);
     messages_written_.fetch_add(1, std::memory_order_relaxed);
   } catch (const std::exception & e) {
     write_errors_.fetch_add(1, std::memory_order_relaxed);
-    RCLCPP_ERROR(get_logger(), "Could not record a subscription change: %s", e.what());
+    RCLCPP_ERROR(get_logger(), "Could not record an event on '%s': %s",
+      event_topic.c_str(), e.what());
   }
 }
 
-void DynamicRecorder::pause()
+void DynamicRecorder::pause(const std::string & reason)
 {
   if (!paused_.exchange(true)) {
-    RCLCPP_INFO(get_logger(), "Recording paused.");
+    RCLCPP_INFO(get_logger(), "Recording paused (%s).", reason.c_str());
+    // Before publish_status(), so the bag records the pause at the moment it took effect rather
+    // than after a status publication that could itself block. Both take the writer lock in turn;
+    // neither holds it across the other, which std::mutex would deadlock on.
+    emit_pause_event(PauseEvent::PAUSED, reason);
     publish_status();
   }
 }
 
-void DynamicRecorder::resume()
+void DynamicRecorder::resume(const std::string & reason)
 {
   if (paused_.exchange(false)) {
-    RCLCPP_INFO(get_logger(), "Recording resumed.");
+    RCLCPP_INFO(get_logger(), "Recording resumed (%s).", reason.c_str());
+    emit_pause_event(PauseEvent::RESUMED, reason);
     publish_status();
   }
 }
@@ -852,7 +1036,7 @@ uint64_t DynamicRecorder::total_messages_missed() const
 void DynamicRecorder::handle_pause(
   const std::shared_ptr<Pause::Request> /*request*/, std::shared_ptr<Pause::Response> /*response*/)
 {
-  pause();
+  pause("service:pause");
 }
 
 void DynamicRecorder::handle_resume(
@@ -860,7 +1044,7 @@ void DynamicRecorder::handle_resume(
 {
   const auto at_ns = to_nanoseconds(request->resume_time);
   if (at_ns == 0) {
-    resume();
+    resume("service:resume");
     response->return_code = Resume::Response::RETURN_CODE_SUCCESS;
     return;
   }
@@ -880,14 +1064,14 @@ void DynamicRecorder::handle_resume(
   if (request->resume_mode == kModeNodeTime) {
     const auto delta = at_ns - now().nanoseconds();
     if (delta <= 0) {
-      resume();
+      resume("service:resume");
     } else {
       // A timer rather than the message path: node-time schedules must fire on a silent robot.
       resume_timer_ = create_wall_timer(
         std::chrono::nanoseconds(delta),
         [this]() {
           resume_timer_->cancel();
-          resume();
+          resume("schedule:resume");
         },
         service_callback_group_);
     }
@@ -903,9 +1087,9 @@ void DynamicRecorder::handle_toggle_paused(
   std::shared_ptr<TogglePaused::Response> /*response*/)
 {
   if (paused_.load()) {
-    resume();
+    resume("service:toggle_paused");
   } else {
-    pause();
+    pause("service:toggle_paused");
   }
 }
 
@@ -1167,6 +1351,10 @@ bool DynamicRecorder::record(const std::string & uri)
   setup_writer_events();
   RCLCPP_INFO(get_logger(), "Recording to '%s'", uri_.c_str());
 
+  // ~/record does not clear the paused flag, so a bag reopened while paused would otherwise begin
+  // with an unexplained hole exactly like the one this event exists to account for.
+  emit_initial_pause_state();
+
   if (!restore.empty()) {
     current_reason_ = "service:record";
     std::vector<std::string> subscribed;
@@ -1353,7 +1541,7 @@ void DynamicRecorder::check_scheduled(
   // Outside the lock: both take the writer lock, which this callback is about to take as well.
   if (fire_resume) {
     RCLCPP_INFO(get_logger(), "Scheduled resume reached on '%s'", topic_name.c_str());
-    resume();
+    resume("schedule:resume");
   }
   if (fire_split) {
     RCLCPP_INFO(get_logger(), "Scheduled split reached on '%s'", topic_name.c_str());

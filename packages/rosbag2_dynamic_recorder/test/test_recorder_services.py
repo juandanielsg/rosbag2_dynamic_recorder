@@ -44,6 +44,7 @@ from std_msgs.msg import String
 from rosbag2_dynamic_recorder_interfaces.srv import (
     GetProfiles,
     GetStatus,
+    GetSubscribedTopics,
     SetProfile,
     SetTopics,
     SubscribeTopics,
@@ -52,11 +53,21 @@ from rosbag2_dynamic_recorder_interfaces.srv import (
 from rclpy.serialization import deserialize_message
 from rosbag2_py import ConverterOptions, SequentialReader, StorageOptions
 
-from rosbag2_dynamic_recorder_interfaces.msg import SubscriptionChangeEvent
-from rosbag2_interfaces.srv import Pause, Record, Resume, Snapshot, SplitBagfile, Stop
+from rosbag2_dynamic_recorder_interfaces.msg import PauseEvent, SubscriptionChangeEvent
+from rosbag2_interfaces.srv import (
+    Pause,
+    Record,
+    Resume,
+    Snapshot,
+    SplitBagfile,
+    Stop,
+    TogglePaused,
+)
 
 EVENT_TYPE = "rosbag2_dynamic_recorder_interfaces/msg/SubscriptionChangeEvent"
 SUBSCRIBED, UNSUBSCRIBED = 0, 1
+PAUSE_EVENT_TYPE = "rosbag2_dynamic_recorder_interfaces/msg/PauseEvent"
+PAUSED, RESUMED = 0, 1
 
 # In practice the untouched topic's largest gap across two set_topics calls measures 0.05s --
 # exactly one publish interval at 20Hz, i.e. no interruption at all. The bound is loose only
@@ -77,6 +88,7 @@ os.environ["ROS_DOMAIN_ID"] = TEST_DOMAIN_ID
 NODE = "/rosbag2_dynamic_recorder"
 TOPICS = ["/rdr_test/alpha", "/rdr_test/beta", "/rdr_test/gamma"]
 EVENT_TOPIC = f"{NODE}/events/subscription_change"
+PAUSE_TOPIC = f"{NODE}/events/pause"
 
 
 class Harness(Node):
@@ -176,6 +188,26 @@ def recorder():
 
 
 @pytest.fixture()
+def paused_recorder():
+    """A recorder that opened its bag already paused, so the bag begins with a hole."""
+    harness, bag, cleanup = _start_recorder(("-p", "start_paused:=true"))
+    try:
+        yield harness, bag
+    finally:
+        cleanup()
+
+
+@pytest.fixture()
+def unexplained_recorder():
+    """A recorder with pause events switched off, for the opt-out."""
+    harness, bag, cleanup = _start_recorder(("-p", "record_pause_events:=false"))
+    try:
+        yield harness, bag
+    finally:
+        cleanup()
+
+
+@pytest.fixture()
 def profiled_recorder():
     """A recorder configured with two deliberately overlapping profiles."""
     harness, bag, cleanup = _start_recorder((
@@ -210,6 +242,87 @@ def test_set_topics_leaves_shared_topics_alone(recorder):
         "a topic in both the old and new set must not be torn down"
     )
     assert set(harness.status().subscribed_topics) == {TOPICS[1], TOPICS[2]}
+
+
+def test_regex_selects_topics_without_naming_them(recorder):
+    """The point of the feature: "record all of these" without enumerating them."""
+    harness, _ = recorder
+    response = harness.call(SubscribeTopics, "subscribe_topics", regex="/rdr_test/")
+    assert response.return_code == 0, response.error_string
+    assert sorted(response.subscribed_topics) == sorted(TOPICS)
+
+
+def test_regex_and_explicit_topics_combine(recorder):
+    harness, _ = recorder
+    response = harness.call(
+        SubscribeTopics, "subscribe_topics", topics=[TOPICS[0]], regex="gamma")
+    assert response.return_code == 0, response.error_string
+    assert sorted(response.subscribed_topics) == sorted([TOPICS[0], TOPICS[2]])
+
+
+def test_exclude_regex_filters_explicitly_named_topics_too(recorder):
+    """Applied to the combined set, which is what makes "all of X except Y" one call."""
+    harness, _ = recorder
+    response = harness.call(
+        SubscribeTopics, "subscribe_topics",
+        topics=[TOPICS[1]], regex="/rdr_test/", exclude_regex="beta")
+    assert response.return_code == 0, response.error_string
+    assert TOPICS[1] not in response.subscribed_topics, (
+        "exclude_regex should filter a topic even when it was named explicitly"
+    )
+    assert sorted(response.subscribed_topics) == sorted([TOPICS[0], TOPICS[2]])
+
+
+def test_a_pattern_never_matches_the_recorders_own_topics(recorder):
+    """Its event channels are written into the bag directly; subscribing would double-record."""
+    harness, _ = recorder
+    response = harness.call(SubscribeTopics, "subscribe_topics", regex=".*")
+    assert response.return_code == 0, response.error_string
+    ours = [t for t in response.subscribed_topics if t.startswith(NODE + "/")]
+    assert ours == [], f"a pattern pulled in our own topics: {ours}"
+    # Non-vacuous: '.*' really did match a great deal else.
+    assert set(TOPICS).issubset(set(response.subscribed_topics))
+
+
+def test_invalid_regex_is_refused_with_the_reason(recorder):
+    """A typo must not look identical to a pattern that legitimately matched nothing."""
+    harness, _ = recorder
+    response = harness.call(SubscribeTopics, "subscribe_topics", regex="/rdr_test/[")
+    assert response.return_code != 0
+    assert "invalid regular expression" in response.error_string
+    assert harness.call(GetSubscribedTopics, "get_subscribed_topics").topics == [], (
+        "a refused request should not have subscribed anything"
+    )
+
+
+def test_regex_matching_nothing_is_refused_on_subscribe(recorder):
+    """Subscribe exists to add topics, so adding none is a request that was not met."""
+    harness, _ = recorder
+    response = harness.call(SubscribeTopics, "subscribe_topics", regex="^/nothing_matches_this")
+    assert response.return_code != 0
+    assert "matched no topics" in response.error_string
+
+
+def test_set_topics_regex_replaces_the_selection(recorder):
+    harness, _ = recorder
+    harness.call(SetTopics, "set_topics", topics=[TOPICS[1]])
+    response = harness.call(SetTopics, "set_topics", regex="alpha")
+    assert response.return_code == 0, response.error_string
+    assert response.subscribed_topics == [TOPICS[0]]
+    assert TOPICS[1] in response.unsubscribed_topics
+
+
+def test_unsubscribe_regex_matches_what_is_recorded_not_the_graph(recorder):
+    """Only the recorded subset can be dropped, so that is the pool a pattern searches."""
+    harness, _ = recorder
+    harness.call(SetTopics, "set_topics", topics=TOPICS[:2])
+    response = harness.call(UnsubscribeTopics, "unsubscribe_topics", regex="/rdr_test/")
+    assert response.return_code == 0, response.error_string
+    # gamma is on the graph and matches the pattern, but was never recorded, so it is not
+    # reported as dropped and not reported as an error either.
+    assert sorted(response.unsubscribed_topics) == sorted(TOPICS[:2])
+    assert TOPICS[2] not in response.unsubscribed_topics
+    assert response.not_subscribed_topics == []
 
 
 def test_unsubscribe_reports_topics_it_was_not_recording(recorder):
@@ -376,6 +489,37 @@ def read_bag(uri):
     return stamps, events
 
 
+def read_pause_events(uri):
+    """PauseEvents in the bag, as (bag-relative seconds, event) pairs in recorded order.
+
+    Same time origin as read_bag(), so an event's offset can be compared directly against the gap
+    it is supposed to explain. That comparison is the whole point: an event carrying the right
+    action but landing nowhere near the hole would explain nothing.
+    """
+    reader = SequentialReader()
+    reader.open(StorageOptions(uri=uri, storage_id="mcap"), ConverterOptions("cdr", "cdr"))
+    types = {t.name: t.type for t in reader.get_all_topics_and_types()}
+
+    every_stamp = []
+    found = []
+    while reader.has_next():
+        topic, data, stamp = reader.read_next()
+        every_stamp.append(stamp)
+        if types.get(topic) == PAUSE_EVENT_TYPE:
+            found.append((stamp, deserialize_message(data, PauseEvent)))
+
+    assert every_stamp, "the bag is empty"
+    origin = min(every_stamp)
+    return [((stamp - origin) / 1e9, event) for stamp, event in found]
+
+
+def widest_gap_window(times):
+    """The (start, end) of the largest gap in a sorted series."""
+    if len(times) < 2:
+        return (0.0, 0.0)
+    return max(zip(times, times[1:]), key=lambda pair: pair[1] - pair[0])
+
+
 def largest_gap(times):
     return max((b - a for a, b in zip(times, times[1:])), default=0.0)
 
@@ -462,6 +606,128 @@ def test_bag_explains_its_own_sparse_channels(recorder):
     event_offset = min(stamps[EVENT_TOPIC])
     assert EVENT_TOPIC in stamps, "the event channel itself should be in the bag"
     assert event_offset >= 0.0
+
+
+PAUSE_SECONDS = 6.0
+
+
+def test_bag_explains_its_own_pause(recorder):
+    """A pause leaves a hole in EVERY topic at once, which is what a crash looks like too.
+
+    SubscriptionChangeEvent explains a channel that stops; this is the case it does not cover, and
+    the one the provenance mechanism was built for. The assertion is deliberately two-sided: the
+    gap has to be really there, and the events have to sit at its edges. Either half alone would
+    pass on a bag that explains nothing.
+    """
+    harness, bag = recorder
+    harness.call(SetTopics, "set_topics", topics=[TOPICS[0]])
+    harness.spin_for(3.0)
+    harness.call(Pause, "pause")
+    harness.spin_for(PAUSE_SECONDS)
+    harness.call(Resume, "resume")
+    harness.spin_for(3.0)
+    harness.call(Stop, "stop")
+    harness.spin_for(1.0)
+
+    stamps, _ = read_bag(bag)
+    events = read_pause_events(bag)
+
+    # The hole is real, and far larger than the ~1.2s environmental stall in recording-stall.md.
+    gap_start, gap_end = widest_gap_window(stamps[TOPICS[0]])
+    assert gap_end - gap_start > PAUSE_SECONDS / 2, (
+        f"expected a pause-sized hole, got {gap_end - gap_start:.2f}s"
+    )
+
+    actions = [event.action for _offset, event in events]
+    assert actions == [PAUSED, RESUMED], f"expected one pause and one resume, got {actions}"
+
+    (paused_at, paused_event), (resumed_at, resumed_event) = events
+    assert abs(paused_at - gap_start) < 1.0, (
+        f"the PAUSED event is at {paused_at:.2f}s but the hole starts at {gap_start:.2f}s"
+    )
+    assert abs(resumed_at - gap_end) < 1.0, (
+        f"the RESUMED event is at {resumed_at:.2f}s but the hole ends at {gap_end:.2f}s"
+    )
+    assert paused_event.reason == "service:pause", paused_event.reason
+    assert resumed_event.reason == "service:resume", resumed_event.reason
+    assert paused_event.node_name, "the event should name its sender"
+
+
+def test_pause_events_are_written_even_though_the_pause_discards_everything_else(recorder):
+    """The event has to escape the gate it is describing, or it could never be recorded."""
+    harness, bag = recorder
+    harness.call(SetTopics, "set_topics", topics=[TOPICS[0]])
+    harness.spin_for(2.0)
+    harness.call(Pause, "pause")
+    harness.spin_for(3.0)
+
+    written_while_paused = harness.status().messages_written
+    harness.spin_for(3.0)
+    assert harness.status().messages_written == written_while_paused, (
+        "messages were written while paused; the gate is not doing its job"
+    )
+
+    harness.call(Stop, "stop")
+    harness.spin_for(1.0)
+    events = read_pause_events(bag)
+    assert [event.action for _offset, event in events] == [PAUSED], (
+        "the PAUSED event was suppressed by the very pause it describes"
+    )
+
+
+def test_toggle_and_schedule_are_distinguishable_from_a_plain_pause(recorder):
+    """The reason is what tells an operator's pause apart from one a schedule caused."""
+    harness, bag = recorder
+    from builtin_interfaces.msg import Time
+
+    harness.call(SetTopics, "set_topics", topics=[TOPICS[0]])
+    harness.spin_for(2.0)
+    harness.call(TogglePaused, "toggle_paused")
+    harness.spin_for(1.0)
+
+    soon = harness.get_clock().now().nanoseconds + 3_000_000_000
+    harness.call(
+        Resume, "resume",
+        resume_time=Time(sec=soon // 10**9, nanosec=soon % 10**9), resume_mode=0)
+    harness.spin_for(5.0)
+    harness.call(Stop, "stop")
+    harness.spin_for(1.0)
+
+    reasons = [event.reason for _offset, event in read_pause_events(bag)]
+    assert reasons == ["service:toggle_paused", "schedule:resume"], reasons
+
+
+def test_a_bag_that_starts_paused_says_why_its_head_is_empty(paused_recorder):
+    """Otherwise the channels look like they failed the moment they were created."""
+    harness, bag = paused_recorder
+    harness.call(SetTopics, "set_topics", topics=[TOPICS[0]])
+    harness.spin_for(3.0)
+    harness.call(Resume, "resume")
+    harness.spin_for(2.0)
+    harness.call(Stop, "stop")
+    harness.spin_for(1.0)
+
+    events = read_pause_events(bag)
+    assert events, "a recorder started paused recorded nothing to explain it"
+    _offset, first = events[0]
+    assert first.action == PAUSED
+    assert first.reason == "startup", first.reason
+
+
+def test_pause_events_can_be_turned_off(unexplained_recorder):
+    """Same opt-out as record_subscription_events, and non-vacuous: the pause still happens."""
+    harness, bag = unexplained_recorder
+    harness.call(SetTopics, "set_topics", topics=[TOPICS[0]])
+    harness.spin_for(2.0)
+    harness.call(Pause, "pause")
+    harness.spin_for(3.0)
+    assert harness.status().paused is True, "the pause itself should still take effect"
+    harness.call(Resume, "resume")
+    harness.spin_for(2.0)
+    harness.call(Stop, "stop")
+    harness.spin_for(1.0)
+
+    assert read_pause_events(bag) == [], "record_pause_events:=false still wrote events"
 
 
 def test_events_are_recorded_for_the_initial_subscription_too(recorder):

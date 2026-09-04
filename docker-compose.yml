@@ -27,6 +27,10 @@ services:
       # Our own packages live outside ./src, which is the upstream rosbag2 clone and must stay clean
       - ./spike:${WORKSPACE:-/home/rosbag/ros2_ws}/src/spike:rw
       - ./packages:${WORKSPACE:-/home/rosbag/ros2_ws}/src/packages:rw
+      # Demo and field-evidence tooling. Mounted at the workspace root rather than under src/
+      # because none of it is a ROS package and colcon should not try to build it. Matches where
+      # docker-compose.demo.yml puts it, so the same script paths work in both containers.
+      - ./demo:${WORKSPACE:-/home/rosbag/ros2_ws}/demo:rw
       - ./build:${WORKSPACE:-/home/rosbag/ros2_ws}/build
       - ./install:${WORKSPACE:-/home/rosbag/ros2_ws}/install
       - ./log:${WORKSPACE:-/home/rosbag/ros2_ws}/log

@@ -7,6 +7,29 @@ string[] topics
 # when provided. An empty entry requests type discovery from the ROS graph.
 string[] topic_types
 
+# Optional regular expression, matched against topic names on the graph. Every match is added to
+# whatever `topics` already names.
+#
+# ECMAScript syntax, and a SEARCH rather than a full match -- the same dialect and the same
+# semantics as stock `ros2 bag record -e` -- so "camera" finds "/robot/camera/image" without
+# needing anchors. Anchor it yourself (`^/robot/`) when you mean a prefix.
+#
+# Two things a pattern deliberately never matches:
+#   - this recorder's own topics. Its event channels are already written into the bag directly, so
+#     subscribing to them would record every event twice and make the provenance harder to read
+#     rather than easier.
+#   - hidden topics, whose names contain a token beginning with an underscore. Stock rosbag2
+#     leaves those out by default too.
+#
+# Types for matched topics always come from the graph: `topic_types` lines up with `topics` by
+# index and a match has no index, so a pattern cannot carry an explicit type.
+string regex
+
+# Optional regular expression removing topics from the selection. Applied AFTER `topics` and
+# `regex` are combined, so it filters explicitly named topics as well as matched ones -- which is
+# what makes "everything under /robot except the depth camera" expressible in one call.
+string exclude_regex
+
 ---
 
 # Return code. 0 on success; 1 on error. Note that an empty `topics` list is a valid request that

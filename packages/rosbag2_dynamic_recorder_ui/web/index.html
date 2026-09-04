@@ -71,7 +71,8 @@
   ol.events { list-style: none; margin: 0; padding: 0; font-size: 13px; }
   ol.events li { padding: 6px 0; border-bottom: 1px solid var(--line); display: flex; gap: 10px; }
   ol.events li:last-child { border-bottom: 0; }
-  .ev-sub { color: var(--ok); } .ev-unsub { color: var(--warn); }
+  .ev-sub, .ev-resumed { color: var(--ok); } .ev-unsub, .ev-paused { color: var(--warn); }
+  .ev-all { font-style: italic; }
   .reason { color: var(--muted); margin-left: auto; font-size: 12px; }
   .empty { color: var(--muted); font-size: 13px; }
   #toast { position: fixed; left: 50%; transform: translateX(-50%); bottom: 20px;
@@ -289,13 +290,25 @@ function renderProfiles(s) {
 
 function renderEvents(s) {
   if (!s.events.length) { $("events").innerHTML = '<li class="empty">Nothing yet.</li>'; return; }
-  $("events").innerHTML = s.events.map((e) => `
+  $("events").innerHTML = s.events.map((e) => {
+    // A pause has no topic because it stops every one of them. Saying "all topics" is the
+    // honest label, and the distinction is the whole reason the two event kinds are separate.
+    if (e.kind === "pause") {
+      return `
+    <li>
+      <span class="ev-${e.action}">${e.action}</span>
+      <span class="name ev-all">all topics</span>
+      <span class="reason">${e.reason}</span>
+    </li>`;
+    }
+    return `
     <li>
       <span class="${e.action === "subscribed" ? "ev-sub" : "ev-unsub"}">
         ${e.action === "subscribed" ? "added" : "removed"}</span>
       <span class="name">${e.topic}</span>
       <span class="reason">${e.reason}</span>
-    </li>`).join("");
+    </li>`;
+  }).join("");
 }
 
 function renderDetail(s) {

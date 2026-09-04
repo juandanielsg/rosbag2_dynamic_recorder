@@ -24,7 +24,7 @@ No ROS graph needed -- build_state is deliberately a plain function.
 
 from types import SimpleNamespace
 
-from rosbag2_dynamic_recorder_ui.ui_node import build_state
+from rosbag2_dynamic_recorder_ui.ui_node import build_state, recent_events
 
 
 def _status(**overrides):
@@ -97,3 +97,34 @@ def test_fields_are_plain_json_types():
     assert isinstance(state["subscribed_topics"], list)
     assert isinstance(state["recording"], bool)
     assert isinstance(state["paused"], bool)
+
+
+def _event(stamp, kind="topic", action="subscribed", topic="/a", reason="startup"):
+    return {"kind": kind, "topic": topic, "action": action, "reason": reason, "stamp": stamp}
+
+
+def test_events_are_ordered_by_when_they_happened_not_when_they_arrived():
+    """Pauses and topic changes arrive on separate subscriptions.
+
+    Appending in arrival order would let a pause appear above a topic change that actually came
+    first, which misrepresents the sequence the feed exists to make readable.
+    """
+    out_of_order = [
+        _event(30.0, kind="pause", action="paused", topic="", reason="service:pause"),
+        _event(10.0, topic="/a"),
+        _event(20.0, topic="/b", action="unsubscribed"),
+    ]
+    assert [e["stamp"] for e in recent_events(out_of_order)] == [30.0, 20.0, 10.0]
+
+
+def test_the_feed_keeps_only_the_newest_events():
+    assert [e["stamp"] for e in recent_events([_event(float(i)) for i in range(40)], limit=3)] == [
+        39.0, 38.0, 37.0
+    ]
+
+
+def test_a_pause_event_carries_no_topic():
+    """The page renders "all topics" for these; an invented topic name would be a lie."""
+    (event,) = recent_events([_event(1.0, kind="pause", action="paused", topic="")])
+    assert event["kind"] == "pause"
+    assert event["topic"] == ""

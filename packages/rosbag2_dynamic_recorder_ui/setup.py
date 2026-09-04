@@ -13,6 +13,10 @@ setup(
         ('share/' + package_name + '/launch', ['launch/recorder_with_ui.launch.py']),
     ],
     install_requires=['setuptools'],
+    # colcon picks its Python test runner from this, not from package.xml. Without it the tests
+    # below were never actually run by `colcon test`: it fell back to `python -m unittest`, which
+    # collected nothing and said so only on stderr.
+    extras_require={'test': ['pytest']},
     zip_safe=True,
     maintainer='juandanielsg',
     maintainer_email='jdsglez@gmail.com',

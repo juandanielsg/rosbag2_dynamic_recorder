@@ -7,6 +7,7 @@ find_package(builtin_interfaces REQUIRED)
 
 rosidl_generate_interfaces(${PROJECT_NAME}
   "msg/SubscriptionChangeEvent.msg"
+  "msg/PauseEvent.msg"
   "msg/RecorderStatus.msg"
   "msg/Profile.msg"
   "srv/SubscribeTopics.srv"

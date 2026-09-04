@@ -34,7 +34,11 @@ from ament_index_python.packages import get_package_share_directory
 from rclpy.node import Node
 from rclpy.qos import DurabilityPolicy, HistoryPolicy, QoSProfile, ReliabilityPolicy
 
-from rosbag2_dynamic_recorder_interfaces.msg import RecorderStatus, SubscriptionChangeEvent
+from rosbag2_dynamic_recorder_interfaces.msg import (
+    PauseEvent,
+    RecorderStatus,
+    SubscriptionChangeEvent,
+)
 from rosbag2_dynamic_recorder_interfaces.srv import (
     GetProfiles,
     SetProfile,
@@ -59,6 +63,17 @@ ACTION_SERVICES = {
     "record": (Record, "record"),
     "set_profile": (SetProfile, "set_profile"),
 }
+
+
+def recent_events(events, limit=15):
+    """The newest events first, across both event streams.
+
+    Subscription changes and pauses arrive on separate subscriptions, so the order they land in is
+    not reliably the order they happened. Both carry the recorder's own stamp, so that is what to
+    sort on -- otherwise a pause could be shown above a topic change that actually preceded it,
+    which is exactly the kind of misreading these events exist to prevent.
+    """
+    return sorted(events, key=lambda event: event["stamp"], reverse=True)[:limit]
 
 
 def build_state(status, age, recorder, available_topics, events):
@@ -134,16 +149,26 @@ class RecorderUi(Node):
         self.create_subscription(
             RecorderStatus, f"{self.recorder}/status", self._on_status, latched
         )
+        events_qos = QoSProfile(
+            depth=50,
+            reliability=ReliabilityPolicy.RELIABLE,
+            durability=DurabilityPolicy.TRANSIENT_LOCAL,
+            history=HistoryPolicy.KEEP_LAST,
+        )
         self.create_subscription(
             SubscriptionChangeEvent,
             f"{self.recorder}/events/subscription_change",
             self._on_event,
-            QoSProfile(
-                depth=50,
-                reliability=ReliabilityPolicy.RELIABLE,
-                durability=DurabilityPolicy.TRANSIENT_LOCAL,
-                history=HistoryPolicy.KEEP_LAST,
-            ),
+            events_qos,
+        )
+        # A pause stops every topic at once, so a feed that only shows topic changes leaves the
+        # biggest gaps in the recording unexplained -- the same reason the recorder writes these
+        # into the bag.
+        self.create_subscription(
+            PauseEvent,
+            f"{self.recorder}/events/pause",
+            self._on_pause_event,
+            events_qos,
         )
 
         # Not `self._clients`: rclpy.node.Node already uses that name for its own list, and
@@ -224,8 +249,24 @@ class RecorderUi(Node):
         with self._lock:
             self._events.append(
                 {
+                    "kind": "topic",
                     "topic": msg.topic_name,
                     "action": "subscribed" if msg.action == 0 else "unsubscribed",
+                    "reason": msg.reason,
+                    "stamp": msg.stamp.sec + msg.stamp.nanosec / 1e9,
+                }
+            )
+            del self._events[:-50]
+
+    def _on_pause_event(self, msg):
+        with self._lock:
+            self._events.append(
+                {
+                    "kind": "pause",
+                    # No topic: that is the point. A pause affects all of them at once, and the
+                    # page says so rather than leaving the row looking like it lost its name.
+                    "topic": "",
+                    "action": "paused" if msg.action == PauseEvent.PAUSED else "resumed",
                     "reason": msg.reason,
                     "stamp": msg.stamp.sec + msg.stamp.nanosec / 1e9,
                 }
@@ -244,7 +285,7 @@ class RecorderUi(Node):
         with self._lock:
             status = self._status
             age = time.monotonic() - self._status_stamp if status else None
-            events = list(reversed(self._events[-15:]))
+            events = recent_events(self._events)
         with self._lock:
             profiles = list(self._profiles)
         state = build_state(status, age, self.recorder, self.available_topics(), events)

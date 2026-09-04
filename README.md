@@ -40,6 +40,14 @@ Topic management:
 | `~/set_profile` | Apply a named topic set. Same guarantee as `set_topics`. |
 | `~/get_profiles` | List the configured profiles. |
 
+The first three also take **`regex`** and **`exclude_regex`**, so a topic set can be selected
+by pattern instead of enumerated — the same ECMAScript search semantics as stock
+`ros2 bag record -e`, so `camera` finds `/robot/camera/image`. `exclude_regex` is applied to
+the combined selection, which makes *everything under `/robot` except the depth camera* a
+single call. A pattern never matches this recorder's own topics (its events are already
+written into the bag directly, so subscribing would record them twice) nor hidden topics.
+An invalid expression is refused with the reason rather than quietly matching nothing.
+
 Recording control. These use the stock `rosbag2_interfaces` definitions, so a client written
 against standard rosbag2 drives this node unchanged:
 
@@ -108,13 +116,35 @@ stopped being true.
 | Topic | Message |
 |---|---|
 | `~/events/subscription_change` | `SubscriptionChangeEvent` — **also written into the bag** |
+| `~/events/pause` | `PauseEvent` — **also written into the bag** |
 | `~/events/write_split` | `WriteSplitEvent` |
 | `~/events/messages_lost` | `MessagesLostEvent` |
 
-Recording the subscription changes into the bag is the point: a channel that stops mid-bag is
-otherwise indistinguishable from a dropout, a crash, or a network fault. The event says what
-changed, when, and why — in-stream, timestamped, and surviving bag splits. Disable with
-`record_subscription_events:=false`.
+Recording these into the bag is the point: a gap mid-bag is otherwise indistinguishable from a
+dropout, a crash, or a network fault. The event says what changed, when, and why — in-stream and
+timestamped.
+
+The two cover different shapes of gap, and you need both:
+
+- **`SubscriptionChangeEvent` explains a channel that stops.** One topic goes sparse while the
+  others carry on. Disable with `record_subscription_events:=false`.
+- **`PauseEvent` explains a bag that stops.** A pause leaves a hole in *every* topic at once —
+  which is exactly what a crash, a network fault, or the environmental stall in
+  [notes/recording-stall.md](notes/recording-stall.md) also look like. Stock
+  `rosbag2_interfaces/srv/Pause` has an empty request and response, so it can carry no
+  explanation; this event is ours. Disable with `record_pause_events:=false`.
+
+Downstream tools cope with the resulting sparse channels — `ros2 bag play` replays them at exact
+fidelity, and `info`/`convert` handle them correctly. One caveat worth knowing: `mcap info`
+averages a channel's rate over the whole bag, so a topic that ran at 20 Hz and then stopped is
+displayed as 4.43 Hz. The events are what turn that back into the truth. Measured in
+[notes/downstream-tools.md](notes/downstream-tools.md).
+
+Note the deliberate asymmetry: while paused **no messages are written, but these events still
+are**. An event suppressed by the pause it describes would leave exactly the hole it exists to
+account for. `reason` distinguishes `service:pause`, `service:resume`, `service:toggle_paused`,
+`schedule:resume`, and `startup` — the last covering both `start_paused` and a `~/record` issued
+while still paused, either of which opens a bag whose head is empty.
 
 ```bash
 ros2 run rosbag2_dynamic_recorder dynamic_recorder --ros-args \
@@ -139,6 +169,7 @@ ros2 service call /rosbag2_dynamic_recorder/set_topics \
 | `snapshot_mode` | `false` | Buffer in memory, write only on `~/snapshot`. |
 | `max_cache_size` | `104857600` | Writer cache in bytes. Must be > 0 for `snapshot_mode`. |
 | `record_subscription_events` | `true` | Write subscription changes into the bag. |
+| `record_pause_events` | `true` | Write pauses and resumes into the bag. |
 | `messages_lost_report_period` | `5.0` | Seconds between `MessagesLostEvent`. `0` disables. |
 
 There is a launch file too:
@@ -158,7 +189,12 @@ Working and verified end to end; not yet run on real hardware. See
   removed mid-recording land in a single MCAP with no gap on untouched topics.
 - **M2 done** — recording control, events and provenance, verified by
   [`m2_smoke_test.sh`](packages/rosbag2_dynamic_recorder/test/m2_smoke_test.sh).
-- **M3 next** — named topic-set profiles switched atomically on mode change.
+- **M3 done** — named topic-set profiles switched atomically on mode change, sharing `set_topics`'
+  guarantee that topics common to both sets are never torn down.
+- **Clients done** — `ros2 dynrec` and the browser UI, in that order: the CLI first so the service
+  API was proved by something scriptable before anything was built on top of it.
+- **M4 next** — field evidence. Hours recorded, topic changes performed, and message loss on
+  untouched topics measured under real load rather than in a smoke test.
 
 ## Layout
 
@@ -166,6 +202,8 @@ Working and verified end to end; not yet run on real hardware. See
 packages/
   rosbag2_dynamic_recorder_interfaces/   service definitions
   rosbag2_dynamic_recorder/              the node
+  rosbag2_dynamic_recorder_cli/          `ros2 dynrec`, the command line client
+  rosbag2_dynamic_recorder_ui/           the browser UI
 notes/                                   architecture, spike findings, roadmap
 spike/                                   throwaway validation of the core premise
 src/                                     optional upstream rosbag2 checkout (untracked)
@@ -198,6 +236,59 @@ ros2 launch rosbag2_dynamic_recorder dynamic_recorder.launch.py \
   uri:=/tmp/mybag topics:="['/scan','/odom']"
 ```
 
+## The command line
+
+`ros2 dynrec` drives a running recorder without service-call syntax, and without a display:
+
+```bash
+ros2 dynrec status            # what is it doing
+ros2 dynrec topics            # what is it recording, one per line
+ros2 dynrec add /scan         # start recording /scan, leave everything else alone
+ros2 dynrec remove /scan      # stop recording it
+ros2 dynrec set /tf /odom     # record exactly these
+ros2 dynrec add -e '^/camera/'                     # everything under /camera
+ros2 dynrec set -e '^/robot/' --exclude-regex depth  # all of /robot but the depth camera
+ros2 dynrec remove -e '/image'                     # drop the heavy ones
+ros2 dynrec profile navigation
+ros2 dynrec pause | resume | toggle | split | snapshot | stop | record
+```
+
+With one recorder on the graph there is nothing to configure: it is found by looking for a node
+offering `~/get_status` of our type, so a recorder launched under any name or in any namespace is
+found, and a node that merely borrows the name is not. Pass `--node` when several are running —
+with more than one it refuses to guess and lists them, because guessing could stop the wrong
+recording.
+
+Every verb **exits non-zero when the recorder refuses**, so a supervisor script can rely on the
+exit code alone and does not have to parse `return_code` out of a service reply:
+
+```bash
+ros2 dynrec add /scan || echo "could not record /scan"
+```
+
+`status --json` gives the same information as data. Fields the recorder cannot vouch for come out
+as `null`, never as a convenient zero — `messages_missed` is `null` when the middleware supplies
+no publication sequence numbers, which is the difference between "nothing was missed" and "no
+idea".
+
+Three things worth knowing:
+
+- `-e/--regex` selects by pattern rather than by name, and `--exclude-regex` filters the
+  result. On `add` and `set` the pattern searches the graph; on `remove` it searches what is
+  actually being recorded, since only a recorded topic can be dropped. A pattern that matches
+  nothing is refused on `add` — adding nothing is a request that was not met, and the likely
+  cause is a typo.
+- `add /scan:sensor_msgs/msg/LaserScan` names the type explicitly. That is how you record a topic
+  whose publisher has not started yet; without it the type is discovered from the graph, which
+  needs the topic to be there already.
+- `resume`, `split` and `record` take `--at` for the scheduled variants: `--at +30s`, `--at 14:05`,
+  `--at 2026-09-03T14:05`, or epoch seconds. Relative and wall-clock times are resolved against
+  *your* clock while the recorder compares against its node clock; on one machine or a clock-synced
+  fleet those agree, and where they might not, use an absolute time.
+
+Built before the browser UI on purpose. A service API is only as good as the thinnest client that
+can drive it, and proving it against something scriptable first is what keeps the API honest.
+
 ## The browser UI
 
 The way to use this without learning service-call syntax:
@@ -210,6 +301,11 @@ Then open **http://localhost:8088**.
 
 Tick a topic to start recording it, untick to stop. Topics you did not touch keep recording
 without a gap. Pause, starting a new file, and stopping are buttons.
+
+**Recent changes** shows both event streams merged: topic changes by name, and pauses as *all
+topics*, because that is what a pause affects. They are ordered by the recorder's own timestamps
+rather than by arrival, since the two come in on separate subscriptions — so a topic change made
+while paused appears in its real place between the pause and the resume.
 
 By default it listens on **loopback only**, because it has no authentication: anyone who can
 reach the port can stop your recording. Pass `bind:=0.0.0.0` to expose it on a trusted network —
@@ -228,34 +324,46 @@ while 3–4% of messages were genuinely absent.
 ## Tests
 
 ```bash
-colcon test --packages-select rosbag2_dynamic_recorder
-colcon test --packages-select rosbag2_dynamic_recorder_ui --python-testing pytest
+colcon test
 colcon test-result --verbose
 ```
 
-**Fourteen integration tests** start a real recorder process and drive its services, on a private
+**Thirty-three integration tests** start a real recorder process and drive its services, on a private
 `ROS_DOMAIN_ID` with their own publishers — no simulator needed, and they cannot collide with
 anything else running on the machine.
 
 Some check the service contract: that a topic present before and after a `set_topics` is never
 torn down, that a stopped recorder refuses for the right reason, that `~/record` restores the
-previous selection, that scheduled operations are refused rather than silently performed
-immediately.
+previous selection, and that a scheduled operation has *not* fired before its time and then
+does — asserted in both directions, so none of them can pass vacuously.
 
 The rest open the resulting bag and check what was actually written — that a topic change does not
 split the file, that the untouched topic spans the whole recording without a hole, that the
 dropped and added topics appear as sparse channels, and that the bag carries the
-`SubscriptionChangeEvent`s explaining them. Measured, the untouched topic's largest gap across two
+`SubscriptionChangeEvent`s explaining them. The pause tests are two-sided on purpose: they assert
+both that a pause-sized hole is really in the data *and* that the `PauseEvent`s sit at its two
+edges, since either half alone would pass against a bag that explains nothing. Measured, the
+untouched topic's largest gap across two
 changes is **0.05s — one publish interval**, which is the central claim of this project stated as
 a number rather than a promise.
 
-**Seven unit tests** cover the UI's rigor rule: unmeasurable values must render as *unknown*, never
+**Ten unit tests** cover the UI's rigor rule: unmeasurable values must render as *unknown*, never
 as a convenient zero. `build_state()` is a plain function precisely so this is testable without a
-ROS graph.
+ROS graph, and `recent_events()` was extracted for the same reason — it pins that the two event
+streams are ordered by when things happened, not by when they arrived.
 
-The `--python-testing pytest` flag on the second command is a colcon quirk, not ours: without it
-colcon picks the deprecated setuptools test runner for `ament_python` packages, collects nothing,
-and exits 5 as though something failed.
+**Thirty-seven tests** cover `ros2 dynrec`. Twenty-five are unit tests over the parts with
+judgement in them — how a recorder is identified on the graph, what `--at` accepts, and the same
+unknown-versus-zero rule at the `--json` boundary where a wrong number is easiest to pipe onward.
+The other twelve run the real command as a subprocess against a real recorder, because every unit
+test imports the code directly and would still pass if the entry points were wrong and
+`ros2 dynrec` did not exist at all.
+
+One colcon quirk, now fixed rather than worked around: colcon chooses its Python test runner from
+`setup.py`, not `package.xml`, and without a declared test dependency on pytest it falls back to
+`python -m unittest`, which collects nothing here. It reported that only on stderr, so
+`colcon test` looked like it passed while running no Python tests at all. Both `ament_python`
+packages now declare `extras_require={'test': ['pytest']}`, so plain `colcon test` runs them.
 
 ## Development
 

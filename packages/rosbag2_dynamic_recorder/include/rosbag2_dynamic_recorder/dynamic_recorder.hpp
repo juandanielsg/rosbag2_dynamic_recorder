@@ -41,6 +41,7 @@
 #include "rosbag2_interfaces/srv/split_bagfile.hpp"
 #include "rosbag2_interfaces/srv/stop.hpp"
 #include "rosbag2_interfaces/srv/toggle_paused.hpp"
+#include "rosbag2_dynamic_recorder_interfaces/msg/pause_event.hpp"
 #include "rosbag2_dynamic_recorder_interfaces/msg/profile.hpp"
 #include "rosbag2_dynamic_recorder_interfaces/msg/recorder_status.hpp"
 #include "rosbag2_dynamic_recorder_interfaces/msg/subscription_change_event.hpp"
@@ -97,8 +98,12 @@ public:
 
   /// Pause recording. Subscriptions stay up and messages keep arriving; they are discarded
   /// rather than written, so the bag shows a gap on every topic and no channel is torn down.
-  void pause();
-  void resume();
+  ///
+  /// `reason` is stamped onto the PauseEvent, which is what makes that gap legible afterwards.
+  /// It is a parameter rather than shared state because a scheduled resume fires from the message
+  /// path while a service call may be in flight, so there is no single "current" reason to read.
+  void pause(const std::string & reason);
+  void resume(const std::string & reason);
   bool is_paused() const;
 
   /// Close the current bag file and open the next one. Recording continues throughout.
@@ -134,6 +139,7 @@ private:
   using Stop = rosbag2_interfaces::srv::Stop;
   using SubscriptionChangeEvent =
     rosbag2_dynamic_recorder_interfaces::msg::SubscriptionChangeEvent;
+  using PauseEvent = rosbag2_dynamic_recorder_interfaces::msg::PauseEvent;
   using RecorderStatus = rosbag2_dynamic_recorder_interfaces::msg::RecorderStatus;
   using WriteSplitEvent = rosbag2_interfaces::msg::WriteSplitEvent;
   using MessagesLostEvent = rosbag2_interfaces::msg::MessagesLostEvent;
@@ -234,6 +240,47 @@ private:
     const std::string & topic_name, const std::string & topic_type, uint8_t action,
     const std::string & reason);
 
+  /// Publish a pause or resume on ~/events/pause and, unless disabled, write it into the bag so
+  /// the resulting gap across every topic explains itself.
+  void emit_pause_event(uint8_t action, const std::string & reason);
+
+  /// Write a PAUSED event if the bag is opening while already paused, so a recording that starts
+  /// with a hole says why. Covers both start_paused and a ~/record issued while paused.
+  void emit_initial_pause_state();
+
+  /// Append an already-serialized event to the open bag on `event_topic`, creating the channel on
+  /// first use. Takes the writer lock and releases it before returning -- callers such as pause()
+  /// go on to call publish_status(), which takes the same lock, and std::mutex is not recursive.
+  ///
+  /// Deliberately not gated on paused_: an event that explains a pause cannot itself be suppressed
+  /// by that pause.
+  void write_event_to_bag(
+    const std::string & event_topic, const std::string & event_type,
+    std::shared_ptr<const rclcpp::SerializedMessage> serialized,
+    const builtin_interfaces::msg::Time & stamp);
+
+  /// Graph topics a pattern is allowed to match.
+  ///
+  /// Excludes this node's own topics: the event channels are already written into the bag
+  /// directly, so subscribing to them would record every event twice. Also excludes hidden
+  /// topics, matching what stock `ros2 bag record` leaves out by default.
+  std::vector<std::string> patternable_graph_topics() const;
+
+  /// Combine explicitly named topics with a regex selection over `candidates`.
+  ///
+  /// `exclude_regex` is applied to the COMBINED set, so it filters explicitly named topics too --
+  /// that is what makes "everything under /robot except the depth camera" one call.
+  ///
+  /// Returns false and fills `error_out` on an invalid expression, so a typo is refused with the
+  /// reason rather than silently matching nothing.
+  bool resolve_selection(
+    const std::vector<std::string> & requested_topics,
+    const std::vector<std::string> & requested_types,
+    const std::string & pattern, const std::string & exclude,
+    const std::vector<std::string> & candidates,
+    std::vector<std::string> & topics_out, std::vector<std::string> & types_out,
+    std::string & error_out) const;
+
   /// Register write-split and messages-lost callbacks on the writer.
   void setup_writer_events();
 
@@ -302,12 +349,14 @@ private:
   rclcpp::Service<GetProfiles>::SharedPtr srv_get_profiles_;
 
   rclcpp::Publisher<SubscriptionChangeEvent>::SharedPtr pub_subscription_change_;
+  rclcpp::Publisher<PauseEvent>::SharedPtr pub_pause_;
   rclcpp::Publisher<WriteSplitEvent>::SharedPtr pub_write_split_;
   rclcpp::Publisher<MessagesLostEvent>::SharedPtr pub_messages_lost_;
   rclcpp::Publisher<RecorderStatus>::SharedPtr pub_status_;
   rclcpp::TimerBase::SharedPtr status_timer_;
 
   rclcpp::Serialization<SubscriptionChangeEvent> subscription_change_serialization_;
+  rclcpp::Serialization<PauseEvent> pause_serialization_;
 
   /// Checked in the write path. Atomic because it is read on every message and written from a
   /// service callback on a different thread.
@@ -356,6 +405,7 @@ private:
 
   std::string serialization_format_;
   bool record_subscription_events_{true};
+  bool record_pause_events_{true};
   bool snapshot_mode_{false};
 
   std::string uri_;

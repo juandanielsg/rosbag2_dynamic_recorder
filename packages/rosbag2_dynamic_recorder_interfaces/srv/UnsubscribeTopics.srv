@@ -3,6 +3,17 @@
 # leaving a sparse channel.
 string[] topics
 
+# Optional regular expression, matched against the topics CURRENTLY BEING RECORDED -- not against
+# the graph. Unsubscribing is only meaningful for something already subscribed, and matching the
+# graph would silently do nothing for a topic that has since left it.
+#
+# ECMAScript syntax, a search rather than a full match, as in stock `ros2 bag record -e`.
+string regex
+
+# Optional regular expression removing topics from the selection, applied after `topics` and
+# `regex` are combined.
+string exclude_regex
+
 ---
 
 # Return code. 0 on success; 1 when none of the requested topics got unsubscribed, or on error.

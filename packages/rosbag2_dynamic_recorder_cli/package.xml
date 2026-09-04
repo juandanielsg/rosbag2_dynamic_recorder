@@ -1,0 +1,31 @@
+<?xml version="1.0"?>
+<?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
+<package format="3">
+  <name>rosbag2_dynamic_recorder_cli</name>
+  <version>0.1.0</version>
+  <description>
+    `ros2 dynrec`: command line control of a running rosbag2_dynamic_recorder.
+
+    Built before any richer GUI on purpose. A service API is only as good as the thinnest client
+    that can drive it, and a CLI is the one you can call from a supervisor node, a launch file, or
+    an ssh session with no display -- which is the access pattern that matters on a robot.
+
+    Finds the recorder by looking for a node offering ~/get_status of our own type, so with one
+    running there is nothing to configure: `ros2 dynrec status` just works. Every verb exits
+    non-zero when the recorder refuses, so a script can rely on the exit code alone.
+  </description>
+  <maintainer email="jdsglez@gmail.com">juandanielsg</maintainer>
+  <license>Apache-2.0</license>
+
+  <depend>rclpy</depend>
+  <depend>ros2cli</depend>
+  <depend>rosbag2_interfaces</depend>
+  <depend>rosbag2_dynamic_recorder_interfaces</depend>
+
+  <test_depend>ament_copyright</test_depend>
+  <test_depend>python3-pytest</test_depend>
+
+  <export>
+    <build_type>ament_python</build_type>
+  </export>
+</package>
