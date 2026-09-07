@@ -124,6 +124,55 @@ class Supervisor(Node):
 one extra participant on the graph per client, which is the reason for the long-lived advice
 above.
 
+## Reading the bag back
+
+The events are written into the bag so that it can explain itself afterwards. `describe()` is what
+cashes that in:
+
+```python
+from dynrec import describe
+
+summary = describe('/tmp/mybag')
+for channel in summary.channels:
+    print(channel.topic, channel.rate, 'vs averaged', channel.averaged_rate)
+```
+
+It exists because of a number that is wrong in every tool that reports it. `mcap info` and
+`ros2 bag info` divide a channel's message count by the **whole bag duration**, so a topic that
+published at 20 Hz for eleven seconds and was then unsubscribed is reported at 5.95 Hz — a healthy
+sensor described as a slow one.
+
+The obvious fix, dividing by the channel's own first-to-last span, only half works:
+
+| topic | msgs | whole bag | own span | subscribed |
+|---|---|---|---|---|
+| alpha | 590 | 16.12 Hz | 16.12 Hz | **19.99 Hz** |
+| beta | 218 | 5.95 Hz | 19.87 Hz | **19.78 Hz** |
+| gamma | 365 | 9.97 Hz | 14.46 Hz | **20.07 Hz** |
+| delta | 80 | 2.19 Hz | 20.25 Hz | **20.06 Hz** |
+
+All four published at 20 Hz. Span arithmetic fixes the channels that *stopped*; it cannot fix
+alpha, whose span is the whole bag because its hole is interior, nor gamma, whose span still
+contains the pause. Only the events locate those.
+
+Two fields, because the difference between them is itself a finding:
+
+`recorded_seconds`
+: How long the channel was subscribed and the recorder was not paused.
+
+`active_seconds`
+: The same, trimmed to when messages were actually arriving. Shorter by the subscription warm-up —
+  the first message cannot arrive until the message definition has been resolved. `rate` is
+  counted over this one. A channel where the two differ a lot went quiet while still subscribed.
+
+And the same honesty rule as everywhere else: if the bag was recorded with
+`record_pause_events:=false` or `record_subscription_events:=false`, the evidence is not there,
+`basis` says so, and `summary.warnings` explains it rather than a plausible number being invented.
+
+`summary.unexplained_gaps` carries the other half of that: a hole shared by *every* live channel
+that no pause accounts for. A crash, a stall, or a pause recorded with the events off all look
+exactly like that, and the reader says so instead of averaging over it.
+
 ## Several recorders
 
 `Recorder()` refuses to guess between two, as the CLI does and for the same reason — guessing

@@ -21,6 +21,9 @@
   <depend>ros2cli</depend>
   <depend>rosbag2_interfaces</depend>
   <depend>rosbag2_dynamic_recorder_interfaces</depend>
+  <!-- For `ros2 dynrec info`, which reads a bag back rather than driving a recorder.
+       Imported inside that verb, so the rest of the CLI works without it. -->
+  <exec_depend>dynrec</exec_depend>
 
   <test_depend>ament_copyright</test_depend>
   <test_depend>python3-pytest</test_depend>

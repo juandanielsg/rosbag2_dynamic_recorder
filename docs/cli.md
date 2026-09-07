@@ -82,6 +82,33 @@ against its node clock. On one machine, or a clock-synced fleet, those agree; ac
 clock has drifted they do not, which is why the absolute forms exist.
 :::
 
+## Reading a bag back
+
+```bash
+ros2 dynrec info /tmp/mybag
+```
+
+The one verb that does not talk to a running recorder. It reads a finished bag and reports what
+each channel really did:
+
+```
+topic                                 msgs  recorded   active       rate    averaged
+/demo/alpha                            590     29.5s    29.5s   20.00 Hz    16.12 Hz
+/demo/beta                             218     11.0s    11.0s   19.87 Hz     5.95 Hz
+/demo/delta                             80      4.0s     4.0s   20.25 Hz     2.19 Hz
+/demo/gamma                            365     18.2s    18.2s   20.10 Hz     9.97 Hz
+```
+
+Every one of those topics published at 20 Hz. The `averaged` column is what `ros2 bag info` and
+`mcap info` report — count over the whole bag — which describes a channel that stopped early as a
+slow sensor. The `rate` column measures each channel over the time it was actually subscribed and
+not paused, which the recorder's events make knowable.
+
+It **exits 2** when the bag holds a hole that nothing explains: a gap shared by every live channel
+with no pause event behind it, which is what a crash, a stall, or a recording made with
+`record_pause_events:=false` all look like. A sparse channel on its own is normal and is not an
+error. `--json` gives the same report as data, with unknowable values as `null`.
+
 ## Machine-readable status
 
 ```bash

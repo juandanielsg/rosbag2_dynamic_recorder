@@ -33,19 +33,22 @@ import time
 
 import pytest
 
-# A domain of its own. Set before any rclpy context is created: the publishers, the recorder
-# subprocess and every client below have to land on the SAME domain or they never see each other.
+import rclpy
+from ament_index_python.packages import get_package_prefix
+from rclpy.executors import SingleThreadedExecutor
+from rclpy.node import Node
+from rclpy.qos import QoSProfile, ReliabilityPolicy
+from std_msgs.msg import String
+
+from dynrec import CallFailed, InvalidRequest, Recorder, ServiceUnavailable, discover
+
+# A domain of its own, passed explicitly to every participant rather than exported into the
+# environment. Setting ROS_DOMAIN_ID at module scope would be a global write at import time, and
+# pytest imports every test module before running any of them -- so whichever integration module
+# was imported last would silently decide the domain for all of them. That is not hypothetical:
+# it is exactly how this module and test_bag_integration.py first collided.
 TEST_DOMAIN_ID = os.environ.get('DYNREC_LIB_TEST_DOMAIN_ID', '73')
-os.environ['ROS_DOMAIN_ID'] = TEST_DOMAIN_ID
-
-import rclpy  # noqa: E402  -- must follow the domain assignment above
-from ament_index_python.packages import get_package_prefix  # noqa: E402
-from rclpy.executors import SingleThreadedExecutor  # noqa: E402
-from rclpy.node import Node  # noqa: E402
-from rclpy.qos import QoSProfile, ReliabilityPolicy  # noqa: E402
-from std_msgs.msg import String  # noqa: E402
-
-from dynrec import CallFailed, InvalidRequest, Recorder, ServiceUnavailable, discover  # noqa: E402
+DOMAIN = int(TEST_DOMAIN_ID)
 
 TOPICS = ['/dynrec_lib_test/alpha', '/dynrec_lib_test/beta', '/dynrec_lib_test/gamma']
 NODE = '/rosbag2_dynamic_recorder'
@@ -54,8 +57,8 @@ NODE = '/rosbag2_dynamic_recorder'
 class Publishers(Node):
     """Traffic on the test topics, so the recorder has something to resolve and record."""
 
-    def __init__(self):
-        super().__init__('dynrec_lib_test_publishers')
+    def __init__(self, context):
+        super().__init__('dynrec_lib_test_publishers', context=context)
         qos = QoSProfile(depth=10, reliability=ReliabilityPolicy.RELIABLE)
         self._pubs = [self.create_publisher(String, topic, qos) for topic in TOPICS]
         self._seq = 0
@@ -92,9 +95,13 @@ def running_recorder():
         env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
     )
 
-    rclpy.init(args=None)
-    publishers = Publishers()
-    executor = SingleThreadedExecutor()
+    # A context of its own rather than rclpy's global one: the global context cannot be
+    # initialised again after shutdown, so a second test module calling rclpy.init() in the same
+    # pytest session would fail. Owning it is what dynrec.client does, for the same reason.
+    context = rclpy.Context()
+    context.init(domain_id=DOMAIN)
+    publishers = Publishers(context)
+    executor = SingleThreadedExecutor(context=context)
     executor.add_node(publishers)
     spinner = threading.Thread(target=executor.spin, daemon=True)
     spinner.start()
@@ -107,7 +114,7 @@ def running_recorder():
     finally:
         executor.shutdown()
         publishers.destroy_node()
-        rclpy.shutdown()
+        context.try_shutdown()
         proc.terminate()
         try:
             proc.wait(timeout=15)
@@ -119,7 +126,7 @@ def running_recorder():
 @pytest.fixture(scope='module')
 def rec(running_recorder):
     """One long-lived client, which is how the library is meant to be used."""
-    with Recorder() as recorder:
+    with Recorder(domain_id=DOMAIN) as recorder:
         yield recorder
 
 
@@ -131,7 +138,7 @@ def test_a_client_finds_the_only_recorder_without_being_told_where_it_is(rec):
 
 def test_discover_lists_the_recorder_on_the_graph(running_recorder):
     """The fleet entry point: names first, then a client per name."""
-    assert NODE in discover()
+    assert NODE in discover(domain_id=DOMAIN)
 
 
 def test_status_reports_the_bag_it_was_started_with(rec, running_recorder):
@@ -328,7 +335,8 @@ def test_a_named_recorder_that_does_not_exist_fails_on_the_call_not_the_connect(
 
     The message names the recorder that *is* running, because a typo is the usual cause.
     """
-    with Recorder('/no_such_recorder', timeout=2.0, discovery_timeout=2.0) as absent:
+    with Recorder('/no_such_recorder', timeout=2.0, discovery_timeout=2.0,
+                  domain_id=DOMAIN) as absent:
         with pytest.raises(ServiceUnavailable, match=NODE):
             absent.status()
 

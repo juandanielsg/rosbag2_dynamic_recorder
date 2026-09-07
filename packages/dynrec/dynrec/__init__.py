@@ -39,13 +39,16 @@ from dynrec.errors import (
     RecorderNotFound,
     ServiceUnavailable,
 )
+from dynrec.bag import BagSummary, ChannelStats, describe
 from dynrec.results import Event, Profiles, Status, TopicChange
 from dynrec.schedule import TIME_MODES
 
 __all__ = [
     'AmbiguousRecorder',
+    'BagSummary',
     'CallFailed',
     'CallTimeout',
+    'ChannelStats',
     'DynrecError',
     'Event',
     'InvalidRequest',
@@ -56,6 +59,7 @@ __all__ = [
     'Status',
     'TIME_MODES',
     'TopicChange',
+    'describe',
     'discover',
 ]
 

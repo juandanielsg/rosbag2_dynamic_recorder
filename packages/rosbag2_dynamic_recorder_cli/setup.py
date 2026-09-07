@@ -30,6 +30,7 @@ setup(
         ],
         'rosbag2_dynamic_recorder_cli.verb': [
             'add = rosbag2_dynamic_recorder_cli.verb.add:AddVerb',
+            'info = rosbag2_dynamic_recorder_cli.verb.info:InfoVerb',
             'pause = rosbag2_dynamic_recorder_cli.verb.pause:PauseVerb',
             'profile = rosbag2_dynamic_recorder_cli.verb.profile:ProfileVerb',
             'profiles = rosbag2_dynamic_recorder_cli.verb.profiles:ProfilesVerb',

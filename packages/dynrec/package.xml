@@ -4,7 +4,8 @@
   <name>dynrec</name>
   <version>0.1.0</version>
   <description>
-    A Python library for driving a running rosbag2_dynamic_recorder from a script.
+    A Python library for driving a running rosbag2_dynamic_recorder from a script, and for
+    reading its bags back honestly afterwards.
 
     `ros2 dynrec` covers the shell; this covers the supervisor. A mission script that changes
     what is recorded when the robot changes what it is doing should not be shelling out to a CLI
@@ -26,6 +27,10 @@
   <depend>rclpy</depend>
   <depend>rosbag2_interfaces</depend>
   <depend>rosbag2_dynamic_recorder_interfaces</depend>
+  <!-- For reading recorded bags back in dynrec.bag. Imported inside the one function that uses
+       it, so the rest of the package stays importable without it. -->
+  <depend>rosbag2_py</depend>
+  <depend>rosidl_runtime_py</depend>
 
   <test_depend>ament_copyright</test_depend>
   <test_depend>python3-pytest</test_depend>

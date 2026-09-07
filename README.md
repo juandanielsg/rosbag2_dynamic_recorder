@@ -258,6 +258,7 @@ ros2 dynrec set -e '^/robot/' --exclude-regex depth  # all of /robot but the dep
 ros2 dynrec remove -e '/image'                     # drop the heavy ones
 ros2 dynrec profile navigation
 ros2 dynrec pause | resume | toggle | split | snapshot | stop | record
+ros2 dynrec info /tmp/mybag   # read a finished bag back, honestly
 ```
 
 With one recorder on the graph there is nothing to configure: it is found by looking for a node
@@ -277,6 +278,22 @@ ros2 dynrec add /scan || echo "could not record /scan"
 as `null`, never as a convenient zero — `messages_missed` is `null` when the middleware supplies
 no publication sequence numbers, which is the difference between "nothing was missed" and "no
 idea".
+
+`ros2 dynrec info` is the odd one out: it reads a finished bag rather than driving a recorder.
+It exists because the rate every other tool reports is averaged over the whole bag, so a topic
+that ran at 20 Hz and was then unsubscribed is displayed as 5.95 Hz — a healthy sensor described
+as a slow one. Reading the recorder's own events makes each channel measurable over the time it
+was really being recorded:
+
+```
+topic                                 msgs  recorded   active       rate    averaged
+/demo/alpha                            590     29.5s    29.5s   20.00 Hz    16.12 Hz
+/demo/beta                             218     11.0s    11.0s   19.87 Hz     5.95 Hz
+/demo/delta                             80      4.0s     4.0s   20.25 Hz     2.19 Hz
+/demo/gamma                            365     18.2s    18.2s   20.10 Hz     9.97 Hz
+```
+
+All four published at 20 Hz. It exits 2 when the bag holds a hole nothing explains.
 
 Three things worth knowing:
 
@@ -330,6 +347,15 @@ if not change.complete:
 **The same unknown-versus-zero rule** the CLI's `--json` and the browser UI enforce:
 `status().messages_missed` is `None` when the middleware supplies no publication sequence
 numbers, never `0`.
+
+It also reads bags back, which is where the recorded events finally pay off:
+
+```python
+from dynrec import describe
+
+for channel in describe('/tmp/mybag').channels:
+    print(channel.topic, channel.rate, 'vs averaged', channel.averaged_rate)
+```
 
 The reason to prefer this over shelling out to the CLI is that it can *watch* rather than poll:
 
@@ -436,20 +462,26 @@ as a convenient zero. `build_state()` is a plain function precisely so this is t
 ROS graph, and `recent_events()` was extracted for the same reason — it pins that the two event
 streams are ordered by when things happened, not by when they arrived.
 
-**Thirty-seven tests** cover `ros2 dynrec`. Twenty-five are unit tests over the parts with
+**Thirty-nine tests** cover `ros2 dynrec`. Twenty-five are unit tests over the parts with
 judgement in them — how a recorder is identified on the graph, what `--at` accepts, and the same
 unknown-versus-zero rule at the `--json` boundary where a wrong number is easiest to pipe onward.
 The other twelve run the real command as a subprocess against a real recorder, because every unit
 test imports the code directly and would still pass if the entry points were wrong and
 `ros2 dynrec` did not exist at all.
 
-**Fifty-eight tests** cover the `dynrec` library. Thirty-six are unit tests over the modules that
-hold the judgement — discovery, the `at=` dialect, and the result types where the unknown-versus-
-zero rule is enforced for the third time. Those modules import no ROS at all, which is what makes
-them runnable without a graph and is the same split `build_state()` made. The other twenty-two
-drive a real recorder: they cover the parts only a live graph can prove, chiefly that the client's
-own context and executor thread work, and that a script can watch the event stream while making
-calls on the same object.
+**Ninety tests** cover the `dynrec` library. Fifty-five are unit tests over the modules that hold
+the judgement — discovery, the `at=` dialect, the result types where the unknown-versus-zero rule
+is enforced for the third time, and the interval arithmetic that turns recorded events into an
+honest rate. Those modules import no ROS at all, which is what makes them runnable without a graph
+and is the same split `build_state()` made.
+
+The other thirty-five drive a real recorder. They cover the parts only a live graph can prove:
+that the client's own context and executor thread work, that a script can watch the event stream
+while making calls on the same object, and that a bag's channels report the rate they were really
+published at. Those last ones measure against the channel recorded end to end rather than against
+a nominal figure — every topic shares one publisher timer, so they were produced at the same rate
+whatever the host achieved, and asserting the nominal 20 Hz made the suite fail for reasons that
+had nothing to do with the code.
 
 One colcon quirk, now fixed rather than worked around: colcon chooses its Python test runner from
 `setup.py`, not `package.xml`, and without a declared test dependency on pytest it falls back to

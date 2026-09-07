@@ -17,6 +17,18 @@ back to for a signature.
 .. autodata:: dynrec.client.DEFAULT_DISCOVERY_TIMEOUT
 ```
 
+## Reading a bag back
+
+The rate every other tool reports is averaged over the whole bag, which describes a channel that
+stopped early as a slow sensor. These read the recorder's own events to measure each channel over
+the time it was actually being recorded.
+
+```{eval-rst}
+.. automodule:: dynrec.bag
+   :members:
+   :member-order: bysource
+```
+
 ## Results
 
 What the calls hand back: plain data, not ROS messages. The rule these types exist to enforce is
