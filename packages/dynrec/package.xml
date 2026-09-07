@@ -1,0 +1,38 @@
+<?xml version="1.0"?>
+<?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
+<package format="3">
+  <name>dynrec</name>
+  <version>0.1.0</version>
+  <description>
+    A Python library for driving a running rosbag2_dynamic_recorder from a script.
+
+    `ros2 dynrec` covers the shell; this covers the supervisor. A mission script that changes
+    what is recorded when the robot changes what it is doing should not be shelling out to a CLI
+    and parsing its output, and it should not have to write seventeen service clients by hand
+    either.
+
+    Talks to the recorder over its own rclpy context and its own executor thread, so it works
+    equally in a plain script with no ROS of its own and inside a callback of the caller's node --
+    where spinning a node someone else's executor already owns would otherwise deadlock. That is
+    the case this exists for: react to an event by changing the recording.
+
+    The modules holding the judgement -- how a recorder is identified, what `at` accepts, and
+    which numbers the recorder cannot vouch for -- import no ROS at all, so they are testable
+    without a graph and readable without one.
+  </description>
+  <maintainer email="jdsglez@gmail.com">juandanielsg</maintainer>
+  <license>Apache-2.0</license>
+
+  <depend>rclpy</depend>
+  <depend>rosbag2_interfaces</depend>
+  <depend>rosbag2_dynamic_recorder_interfaces</depend>
+
+  <test_depend>ament_copyright</test_depend>
+  <test_depend>python3-pytest</test_depend>
+  <test_depend>rosbag2_dynamic_recorder</test_depend>
+  <test_depend>std_msgs</test_depend>
+
+  <export>
+    <build_type>ament_python</build_type>
+  </export>
+</package>

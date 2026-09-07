@@ -203,6 +203,7 @@ packages/
   rosbag2_dynamic_recorder_interfaces/   service definitions
   rosbag2_dynamic_recorder/              the node
   rosbag2_dynamic_recorder_cli/          `ros2 dynrec`, the command line client
+  dynrec/                                the Python library, for scripts
   rosbag2_dynamic_recorder_ui/           the browser UI
 notes/                                   architecture, spike findings, roadmap
 spike/                                   throwaway validation of the core premise
@@ -289,6 +290,76 @@ Three things worth knowing:
 Built before the browser UI on purpose. A service API is only as good as the thinnest client that
 can drive it, and proving it against something scriptable first is what keeps the API honest.
 
+## The Python library
+
+`ros2 dynrec` covers the shell. `dynrec` covers the supervisor — the mission script that changes
+what is recorded because the robot changed what it is doing:
+
+```python
+from dynrec import Recorder
+
+with Recorder() as rec:                    # the only recorder on the graph
+    rec.set_topics(['/tf', '/odom'])
+    rec.add(['/camera/image:sensor_msgs/msg/Image'])
+    rec.add(regex='^/lidar/', exclude_regex='intensity')
+    rec.profile('navigation')
+    rec.pause()
+    rec.resume(at='+30s')
+    print(rec.status().subscribed_topics)
+```
+
+Discovery, the pattern arguments, the `TOPIC:TYPE` form and the `at=` dialect are all the same as
+the CLI's, so a command that worked in a shell keeps working when it becomes a script.
+
+**Calls raise when the recorder refuses**, which is the library's version of the CLI's exit code —
+a script reads top to bottom with no return codes to check. A *partial* success does not raise,
+because the service does not call it a failure either:
+
+```python
+change = rec.set_topics(['/scan', '/not_yet_published'])
+if not change.complete:
+    print('not recording:', change.unavailable)   # the only warning there is
+```
+
+**The same unknown-versus-zero rule** the CLI's `--json` and the browser UI enforce:
+`status().messages_missed` is `None` when the middleware supplies no publication sequence
+numbers, never `0`.
+
+The reason to prefer this over shelling out to the CLI is that it can *watch* rather than poll:
+
+```python
+rec.on_event(lambda e: print(e.stamp, e.kind, e.action, e.topic or 'all topics'))
+rec.on_status(lambda s: print(s.messages_written))
+rec.wait_for(lambda s: not s.recording, timeout=60)
+```
+
+Both event streams arrive flattened into one shape, because a channel that stops and a bag that
+stops are the same question asked twice. They come in on separate subscriptions, so sort by
+`event.stamp` — the recorder's clock — rather than trusting arrival order.
+
+Two things worth knowing:
+
+- **It brings its own rclpy context and its own executor thread.** So it works in a plain script
+  with no ROS of its own, *and* inside a callback of your own node — where handing it your node
+  and spinning that would deadlock, since the executor calling you already owns it. Reacting to
+  an event by changing the recording is the case this exists for, so it must not be the case that
+  hangs.
+- **A `Recorder` is meant to be long-lived.** It holds one client per service rather than building
+  one per call, which is both faster and, on the evidence in
+  [roadmap.md](notes/roadmap.md), the difference between a script that still works after a few
+  thousand calls and one that quietly stops getting replies. Close it with `close()` or the
+  `with` block.
+
+With several recorders running, `Recorder()` refuses to guess — as the CLI does, and for the same
+reason. Name one, after asking who is out there:
+
+```python
+from dynrec import Recorder, discover
+
+for name in discover():
+    Recorder(name).stop()
+```
+
 ## The browser UI
 
 The way to use this without learning service-call syntax:
@@ -365,6 +436,14 @@ unknown-versus-zero rule at the `--json` boundary where a wrong number is easies
 The other twelve run the real command as a subprocess against a real recorder, because every unit
 test imports the code directly and would still pass if the entry points were wrong and
 `ros2 dynrec` did not exist at all.
+
+**Fifty-eight tests** cover the `dynrec` library. Thirty-six are unit tests over the modules that
+hold the judgement — discovery, the `at=` dialect, and the result types where the unknown-versus-
+zero rule is enforced for the third time. Those modules import no ROS at all, which is what makes
+them runnable without a graph and is the same split `build_state()` made. The other twenty-two
+drive a real recorder: they cover the parts only a live graph can prove, chiefly that the client's
+own context and executor thread work, and that a script can watch the event stream while making
+calls on the same object.
 
 One colcon quirk, now fixed rather than worked around: colcon chooses its Python test runner from
 `setup.py`, not `package.xml`, and without a declared test dependency on pytest it falls back to
