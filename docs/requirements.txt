@@ -1,0 +1,6 @@
+# Pinned with upper bounds so a new major release of any of these cannot break the docs build
+# without someone choosing to raise the bound. The build is hermetic otherwise: no intersphinx,
+# no remote inventories, nothing fetched at build time.
+sphinx>=7.2,<9
+myst-parser>=2.0,<5
+furo>=2024.1.29

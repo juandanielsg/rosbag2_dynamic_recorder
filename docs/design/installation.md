@@ -1,0 +1,2 @@
+```{include} ../../notes/installation.md
+```

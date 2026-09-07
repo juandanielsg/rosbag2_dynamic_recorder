@@ -5,6 +5,11 @@ drop a topic, or swap the whole set — without stopping the writer and without 
 
 Recording continues uninterrupted on every topic you did not touch.
 
+**Documentation** lives in [`docs/`](docs/) and builds with Sphinx — the service API, the three
+clients, a generated reference for the Python library, and the design notes. Build it with
+`pip install -r docs/requirements.txt && sphinx-build -b html docs docs/_build/html`, or download
+the `docs-html` artifact from the latest `docs` workflow run.
+
 ## Why
 
 `rosbag2_transport::Recorder` fixes its topic set at construction from `RecordOptions`. Changing
@@ -205,6 +210,7 @@ packages/
   rosbag2_dynamic_recorder_cli/          `ros2 dynrec`, the command line client
   dynrec/                                the Python library, for scripts
   rosbag2_dynamic_recorder_ui/           the browser UI
+docs/                                    Sphinx documentation sources
 notes/                                   architecture, spike findings, roadmap
 spike/                                   throwaway validation of the core premise
 src/                                     optional upstream rosbag2 checkout (untracked)

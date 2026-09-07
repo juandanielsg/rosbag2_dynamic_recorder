@@ -29,3 +29,6 @@ Thumbs.db
 
 # Local-only working notes: upstream correspondence drafts, not part of the project.
 /private/
+
+# Sphinx build output
+docs/_build/
