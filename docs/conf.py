@@ -89,7 +89,8 @@ autodoc_typehints = 'description'
 
 html_theme = 'furo'
 html_title = 'rosbag2_dynamic_recorder'
-html_static_path = ['_static']
+# No html_static_path: there are no custom assets, and an empty _static/ is a directory git will
+# not track -- so it exists locally, vanishes in a fresh clone, and fails the build under -W.
 
 REPO = 'https://github.com/juandanielsg/rosbag2_dynamic_recorder'
 BRANCH = 'main'
