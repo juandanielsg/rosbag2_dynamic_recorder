@@ -146,3 +146,22 @@ def test_a_disconnected_page_gets_no_axis_to_draw_on():
     """Without a status there is no session to place events against, so claim nothing."""
     state = build_state(None, None, "/rec", ["/a"], [])
     assert "recording_started" not in state
+
+
+def test_the_page_fixture_matches_what_build_state_actually_returns():
+    """Keeps the JavaScript tests honest.
+
+    test_page_script.py writes its sample state out by hand so it needs only node, not a ROS
+    install. That is what lets it run on a machine without ROS -- and it is also how it could
+    quietly drift from the real payload, testing the page against a shape it never receives. This
+    is the assertion that would notice.
+    """
+    from test_page_script import SAMPLE_STATE
+
+    real = set(_state(_status()))
+    # snapshot_state() adds these two after build_state returns.
+    fixture = set(SAMPLE_STATE) - {"profiles", "history"}
+    assert fixture == real, (
+        "the page fixture and build_state have diverged; "
+        f"only in fixture: {sorted(fixture - real)}, only in build_state: {sorted(real - fixture)}"
+    )
