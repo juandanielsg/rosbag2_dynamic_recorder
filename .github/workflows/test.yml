@@ -1,0 +1,99 @@
+# Builds every package and runs the full test suite on ROS 2 Rolling.
+#
+# This is the workflow that turns the README's claims into evidence. The numbers it quotes -- the
+# worst-case gap on an untouched topic, unknown-never-zero at every boundary -- are only worth
+# stating in public because something re-checks them on every push.
+#
+# It runs in the official `ros:rolling-ros-base` container rather than installing ROS onto the
+# runner, because a ROS install from apt on a bare runner is most of the job's runtime and buys
+# nothing: the image is the same packages, already unpacked.
+#
+# Dependencies come from `rosdep` against our own package.xml files rather than an apt list
+# written out here. A hand-written list drifts the moment someone adds a <depend> and the failure
+# lands as a confusing CMake error rather than as "you forgot to add it here".
+
+name: test
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: test-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    container: ros:rolling-ros-base
+    # The integration tests start real recorder processes and wait on real message traffic, so
+    # this is slower than a unit-test job and the timeout has to leave room for a loaded runner.
+    timeout-minutes: 30
+
+    env:
+      # Keep DDS discovery on loopback. The tests already isolate themselves on private domain
+      # IDs, so this is belt-and-braces: it stops a runner's network from participating at all.
+      ROS_AUTOMATIC_DISCOVERY_RANGE: LOCALHOST
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          set -ex
+          apt-get update
+          # colcon and pytest are not in ros-base. node is not a ROS dependency at all: the UI
+          # tests execute the page's own JavaScript and skip themselves when node is absent, so
+          # without it they pass while checking nothing.
+          apt-get install -y --no-install-recommends \
+            python3-colcon-common-extensions \
+            python3-pytest \
+            nodejs
+          rosdep update
+          rosdep install --from-paths packages --ignore-src -r -y
+
+      # --base-paths because our packages live in packages/ rather than in a src/ directory --
+      # src/ is reserved for the optional upstream rosbag2 checkout and must stay out of the build.
+      # `set -ex`, deliberately not `-eux`: ROS's own setup.sh reads unbound variables, so `-u`
+      # kills the job on `AMENT_TRACE_SETUP_FILES: unbound variable` before a single package builds.
+      - name: Build
+        run: |
+          set -ex
+          . /opt/ros/rolling/setup.sh
+          colcon build --base-paths packages --event-handlers console_direct+
+
+      # --return-code-on-test-failure makes this step fail on a failing test. Without it `colcon
+      # test` exits 0 when tests fail and only the separate test-result step notices, which is a
+      # long way to travel to find out something is broken.
+      - name: Test
+        run: |
+          set -ex
+          . /opt/ros/rolling/setup.sh
+          . install/setup.sh
+          colcon test --base-paths packages \
+            --event-handlers console_direct+ \
+            --return-code-on-test-failure
+
+      # Runs even when the step above failed, because the summary is the thing worth reading: it
+      # names which tests failed rather than leaving that in the middle of the build log.
+      - name: Test results
+        if: always()
+        run: |
+          . /opt/ros/rolling/setup.sh
+          colcon test-result --verbose
+
+      # The pytest XML and the per-test logs, kept so a failure that does not reproduce locally
+      # can still be read afterwards.
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: test-logs
+          path: |
+            log/latest_test/
+            build/**/pytest.xml
+          retention-days: 30
