@@ -9,10 +9,10 @@ drop a topic, or swap the whole set — without stopping the writer and without 
 
 Recording continues uninterrupted on every topic you did not touch.
 
-**Documentation** lives in [`docs/`](docs/) and builds with Sphinx — the service API, the three
-clients, and a generated reference for the Python library. Build it with
-`pip install -r docs/requirements.txt && sphinx-build -b html docs docs/_build/html`, or download
-the `docs-html` artifact from the latest `docs` workflow run.
+**Documentation: <https://juandanielsg.github.io/rosbag2_dynamic_recorder/>** — the service API,
+the three clients, and a generated reference for the Python library. Published from
+[`docs/`](docs/) on every push to `main`. To build it yourself:
+`pip install -r docs/requirements.txt && sphinx-build -b html docs docs/_build/html`.
 
 ## ROS 2 compatibility
 
