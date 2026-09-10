@@ -94,9 +94,9 @@ stream down with it.
 
 ## 4. A `Recorder` is meant to be long-lived
 
-It holds one client per service rather than building one per call, which is both faster and — on
-the evidence in [the roadmap](../design/roadmap.md) — the difference between a script that still
-works after a few thousand calls and one that quietly stops getting replies. Close it with
+It holds one client per service rather than building one per call, which is both faster and —
+past the ~7,000-call ceiling observed on a single rclpy node — the difference between a script that
+still works after a few thousand calls and one that quietly stops getting replies. Close it with
 `close()`, or use the `with` block.
 
 ### Why it brings its own ROS context

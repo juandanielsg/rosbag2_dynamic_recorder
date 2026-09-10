@@ -43,8 +43,10 @@ uint64 messages_written
 #
 # WARNING: this is reported losses, not actual losses. Messages can go missing without either
 # layer raising an event -- observed on a TurtleBot 4 run where this field read 0 while roughly
-# 3-4% of messages were absent from the bag (see notes/recording-stall.md). Do not present this
-# to a user as a guarantee that nothing was lost.
+# 3-4% of messages were absent from the bag. The mechanism: publishers at KEEP_LAST(10) overwrite
+# their history while the recorder's callback thread is blocked, so those samples are never
+# delivered and no reader-side loss event can fire. Do not present this to a user as a guarantee
+# that nothing was lost.
 uint64 messages_lost
 
 # Messages DETECTED as missing by watching for gaps in each publisher's sequence numbers.

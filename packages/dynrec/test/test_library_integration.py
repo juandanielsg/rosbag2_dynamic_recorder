@@ -344,7 +344,7 @@ def test_a_named_recorder_that_does_not_exist_fails_on_the_call_not_the_connect(
 def test_many_calls_on_one_client_keep_being_answered(rec):
     """A long-lived script makes thousands of calls, and a client that stops replying is silent.
 
-    notes/roadmap.md records a single rclpy node ceasing to receive service responses after roughly
+    A single rclpy node has been observed ceasing to receive service responses after roughly
     7,000 calls, against a client that created and destroyed a client per call. This library keeps
     one per service instead. Three hundred is a floor, not a reproduction of that ceiling -- it is
     what fits in a test suite -- but it fails loudly if reuse breaks outright.

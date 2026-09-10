@@ -57,7 +57,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         ros-rolling-ament-cmake-clang-format
 
 # --- mcap CLI (optional dev tool) -------------------------------------------
-# Used by the spike's acceptance checks (`mcap info` / `mcap doctor`). Tolerated as a
+# For inspecting recorded bags by hand (`mcap info` / `mcap doctor`). Tolerated as a
 # best-effort step so a release-URL change cannot break the whole image build.
 ARG MCAP_VERSION=v0.0.50
 RUN curl -fsSL -o /usr/local/bin/mcap \

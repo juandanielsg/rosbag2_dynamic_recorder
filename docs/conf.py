@@ -49,9 +49,8 @@ extensions = [
     'sphinx.ext.viewcode',
 ]
 
-# Markdown throughout, because every existing document in this repository is Markdown and the
-# design notes below are included verbatim from notes/ rather than copied. A reStructuredText
-# docs tree would have meant maintaining two dialects or rewriting eight working notes.
+# Markdown throughout, because every existing document in this repository is Markdown. A
+# reStructuredText docs tree would have meant maintaining two dialects or rewriting all of them.
 source_suffix = {'.md': 'markdown', '.rst': 'restructuredtext'}
 
 myst_enable_extensions = [
@@ -100,65 +99,3 @@ html_theme_options = {
     'source_branch': BRANCH,
     'source_directory': 'docs/',
 }
-
-# -- links out of the docs tree ----------------------------------------------------------------
-
-
-def _repo_url(path):
-    """A link to `path` in the repository, as a file or as a directory."""
-    kind = 'tree' if path.endswith('/') or '.' not in path.rsplit('/', 1)[-1] else 'blob'
-    return '{}/{}/{}/{}'.format(REPO, kind, BRANCH, path.rstrip('/'))
-
-
-def _rewrite_repo_links(app, doctree):
-    """Point the design notes' links at the repository when they are not documentation pages.
-
-    The notes under `design/` are included verbatim from `notes/`, so their relative links are
-    written relative to `notes/` -- `../spike/verify_events.py` means the repository's `spike/`
-    directory. Sibling links like `architecture.md` are other notes and resolve to real pages here;
-    the rest point at a smoke test, a probe script, a source directory, none of which is a
-    documentation page.
-
-    Rewriting those rather than editing the notes keeps one source for them and keeps both
-    renderings working: relative on GitHub, absolute here. Suppressing the warning instead would
-    have hidden genuinely broken cross-references along with these.
-
-    Runs on `doctree-read`, before the reference resolution that would otherwise warn.
-    """
-    import posixpath
-
-    from docutils import nodes as docutils_nodes
-    from sphinx import addnodes
-
-    docname = app.env.docname
-    if not docname.startswith('design/'):
-        return
-
-    for node in list(doctree.findall(addnodes.pending_xref)):
-        # MyST marks its own local links with reftype 'myst' and leaves refdomain None, so the
-        # reftype is what identifies them.
-        if node.get('reftype') != 'myst':
-            continue
-        target = node.get('reftarget', '')
-        path, _, anchor = target.partition('#')
-        if not path:
-            continue
-
-        # MyST hands over a docname ('design/architecture') for a link it could resolve inside the
-        # source tree, and the raw path ('../spike/verify_events.py') for one it could not. So a
-        # target that names a real page is left alone, and only the leftovers are rewritten.
-        as_doc = path[:-3] if path.endswith('.md') else path
-        if as_doc in app.env.found_docs:
-            continue
-
-        url = _repo_url(posixpath.normpath(posixpath.join('notes', path)))
-        if anchor:
-            url += '#' + anchor
-        reference = docutils_nodes.reference('', '', refuri=url, internal=False)
-        reference.extend(node.children)
-        node.replace_self(reference)
-
-
-def setup(app):
-    app.connect('doctree-read', _rewrite_repo_links)
-    return {'parallel_read_safe': True, 'parallel_write_safe': True}

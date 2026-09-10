@@ -29,22 +29,12 @@ ui
 library/api
 ```
 
-```{toctree}
-:maxdepth: 1
-:caption: Design notes
-
-design/index
-```
-
 ## Where to start
 
 - **Just want it running?** [Install](install.md), then the [browser UI](ui.md).
 - **Driving it from a shell or a supervisor script?** [The command line](cli.md).
 - **Driving it from Python?** [The library guide](library/index.md) and its
   [API reference](library/api.md).
-- **Changing the recorder itself?** The [design notes](design/index.md) first — `architecture.md`
-  records *why* this is built on `Writer` rather than on `Recorder`, and the spike notes carry
-  measured timings and one retracted conclusion worth not rediscovering.
 
 ## The four ways in
 

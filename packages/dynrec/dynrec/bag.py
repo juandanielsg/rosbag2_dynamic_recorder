@@ -183,9 +183,11 @@ def clip_windows(windows, bounds):
 
     Used to cut a subscribed window down to when the channel was actually delivering. Subscribing
     is not instantaneous -- the first message cannot arrive until the topic's message definition
-    has been resolved, ~0.4-0.6s by the measurements in notes/spike-plan.md, and DDS matching adds
-    more. Counting that silence as time the channel was producing messages would report a healthy
-    20 Hz sensor at 16 Hz purely because it was subscribed shortly before it started arriving.
+    has been resolved -- ~0.4-0.6s per new topic by measurement, nearly all of it definition
+    resolution (a nested `sensor_msgs/Imu` cost 300-470ms against 71ms for `std_msgs/String`) --
+    and DDS matching adds more. Counting that silence as time the channel was producing messages
+    would report a healthy 20 Hz sensor at 16 Hz purely because it was subscribed shortly before
+    it started arriving.
     """
     clipped = []
     for start, end in windows:

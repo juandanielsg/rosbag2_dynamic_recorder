@@ -134,16 +134,15 @@ The two cover different shapes of gap, and you need both:
 - **`SubscriptionChangeEvent` explains a channel that stops.** One topic goes sparse while the
   others carry on. Disable with `record_subscription_events:=false`.
 - **`PauseEvent` explains a bag that stops.** A pause leaves a hole in *every* topic at once —
-  which is exactly what a crash, a network fault, or the environmental stall in
-  [notes/recording-stall.md](notes/recording-stall.md) also look like. Stock
+  which is exactly what a crash, a network fault, or the environmental rosbag2 stall (~1.2s
+  dropped from every topic, roughly every 31.2s) also look like. Stock
   `rosbag2_interfaces/srv/Pause` has an empty request and response, so it can carry no
   explanation; this event is ours. Disable with `record_pause_events:=false`.
 
 Downstream tools cope with the resulting sparse channels — `ros2 bag play` replays them at exact
 fidelity, and `info`/`convert` handle them correctly. One caveat worth knowing: `mcap info`
 averages a channel's rate over the whole bag, so a topic that ran at 20 Hz and then stopped is
-displayed as 4.43 Hz. The events are what turn that back into the truth. Measured in
-[notes/downstream-tools.md](notes/downstream-tools.md).
+displayed as 4.43 Hz. The events are what turn that back into the truth.
 
 Note the deliberate asymmetry: while paused **no messages are written, but these events still
 are**. An event suppressed by the pause it describes would leave exactly the hole it exists to
@@ -186,14 +185,11 @@ ros2 launch rosbag2_dynamic_recorder dynamic_recorder.launch.py \
 
 ## Status
 
-Working and verified end to end; not yet run on real hardware. See
-[notes/roadmap.md](notes/roadmap.md).
+Working and verified end to end; not yet run on real hardware.
 
-- **M1 done** — topic management, verified by
-  [`m1_smoke_test.sh`](packages/rosbag2_dynamic_recorder/test/m1_smoke_test.sh): topics added and
-  removed mid-recording land in a single MCAP with no gap on untouched topics.
-- **M2 done** — recording control, events and provenance, verified by
-  [`m2_smoke_test.sh`](packages/rosbag2_dynamic_recorder/test/m2_smoke_test.sh).
+- **M1 done** — topic management: topics added and removed mid-recording land in a single MCAP
+  with no gap on untouched topics.
+- **M2 done** — recording control, events and provenance.
 - **M3 done** — named topic-set profiles switched atomically on mode change, sharing `set_topics`'
   guarantee that topics common to both sets are never torn down.
 - **Clients done** — `ros2 dynrec` and the browser UI, in that order: the CLI first so the service
@@ -211,16 +207,15 @@ packages/
   dynrec/                                the Python library, for scripts
   rosbag2_dynamic_recorder_ui/           the browser UI
 docs/                                    Sphinx documentation sources
-notes/                                   architecture, spike findings, roadmap
-spike/                                   throwaway validation of the core premise
 src/                                     optional upstream rosbag2 checkout (untracked)
 ```
 
-`notes/` is worth reading before changing anything —
-[architecture.md](notes/architecture.md) records *why* this is built on `Writer` rather than
-wrapping `Recorder`, and [spike-plan.md](notes/spike-plan.md) has measured timings (adding a topic
-costs ~0.4–0.6s, almost all of it message-definition resolution) plus one retracted conclusion
-worth not rediscovering.
+Two decisions are worth knowing before changing anything. This is built on `rosbag2_cpp::Writer`
+rather than wrapping `rosbag2_transport::Recorder`, because `Recorder` binds its topic set to the
+static `RecordOptions` given at construction and its only reconfiguration path tears down every
+subscription and closes the bag — the file split this project exists to avoid. And adding a topic
+costs ~0.4–0.6s, almost all of it message-definition resolution, which is why `set_topics` over
+several new topics runs on a worker thread rather than on the executor.
 
 ## Install
 
@@ -377,9 +372,9 @@ Two things worth knowing:
   an event by changing the recording is the case this exists for, so it must not be the case that
   hangs.
 - **A `Recorder` is meant to be long-lived.** It holds one client per service rather than building
-  one per call, which is both faster and, on the evidence in
-  [roadmap.md](notes/roadmap.md), the difference between a script that still works after a few
-  thousand calls and one that quietly stops getting replies. Close it with `close()` or the
+  one per call, which is both faster and, past the ~7,000-call ceiling observed on a single rclpy
+  node, the difference between a script that still works after a few thousand calls and one that
+  quietly stops getting replies. Close it with `close()` or the
   `with` block.
 
 With several recorders running, `Recorder()` refuses to guess — as the CLI does, and for the same
@@ -427,9 +422,8 @@ depends on nothing beyond `rclpy` and the Python standard library: no web framew
 build step, because every dependency there is an install barrier.
 
 It also refuses to overstate what it knows. Where the recorder cannot actually measure something,
-the UI says **unknown** rather than showing a reassuring zero — see
-[notes/recording-stall.md](notes/recording-stall.md) for the case where `messages_lost` read 0
-while 3–4% of messages were genuinely absent.
+the UI says **unknown** rather than showing a reassuring zero — on one TurtleBot 4 run
+`messages_lost` read 0 while 3–4% of messages were genuinely absent from the bag.
 
 ## Tests
 
@@ -506,7 +500,7 @@ Inside the container:
 colcon build --packages-select \
   rosbag2_dynamic_recorder_interfaces rosbag2_dynamic_recorder --symlink-install
 source install/setup.bash
-bash src/packages/rosbag2_dynamic_recorder/test/m1_smoke_test.sh
+colcon test --packages-select rosbag2_dynamic_recorder && colcon test-result --verbose
 ```
 
 The upstream rosbag2 sources are **optional** — useful for reading the code this builds against,
@@ -522,8 +516,8 @@ Notes:
   from the host — but you must launch the UI with `bind:=0.0.0.0`, since the default loopback bind
   is loopback *inside the container* and Docker would have nothing to forward to. 8088 rather than 8080 because 8080 is very often already taken. It does **not** use `network_mode: host`: on Docker Desktop that is the WSL2 VM's
   network, which the host OS cannot reach.
-- Our packages live in `packages/` and `spike/`, mounted into the workspace separately, so the
-  optional upstream checkout in `src/` stays pristine.
+- Our packages live in `packages/`, mounted into the workspace separately, so the optional
+  upstream checkout in `src/` stays pristine.
 - The image carries the workspace dependencies. If you add a package with new dependencies, run
   `rosdep install -r -y --from-paths src --ignore-src` inside the container.
 

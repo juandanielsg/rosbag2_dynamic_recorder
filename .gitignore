@@ -32,3 +32,10 @@ Thumbs.db
 
 # Sphinx build output
 docs/_build/
+
+# Local-only working notes and the throwaway spike that validated the premise. Both are kept on
+# disk -- notes/ is still the reasoning record a contributor edits, and spike/ still builds -- but
+# neither is published: this repository is public and they are working material, not a deliverable.
+# Untracked in the same commit that removed them from the published docs tree.
+/notes/
+/spike/

@@ -371,7 +371,10 @@ bool DynamicRecorder::subscribe_topic(
   // Diagnostic: messages have been observed going missing from bags without the transport or the
   // writer reporting any loss. A subscription QoS weaker than what the publisher offers would
   // explain drops that raise no event, so record what we actually asked for versus what was
-  // offered. See notes/recording-stall.md.
+  // offered. Logged against the TB4 sim, this refuted the QoS hypothesis: we subscribe RELIABLE
+  // with history matching or deeper than what is offered. The loss is upstream of us -- publishers
+  // at KEEP_LAST(10) overwrite their history while the callback thread is blocked, so the samples
+  // are never delivered and no reader-side loss event can fire.
   {
     const auto describe = [](const rclcpp::QoS & q) {
         const auto & p = q.get_rmw_qos_profile();
@@ -915,8 +918,8 @@ void DynamicRecorder::emit_pause_event(uint8_t action, const std::string & reaso
   }
 
   // A pause leaves a hole in every topic at once, which is exactly what a crash, a network fault
-  // or the stall in notes/recording-stall.md also look like. Without this the bag cannot tell
-  // them apart.
+  // or the environmental rosbag2 stall (~1.2s across every topic, roughly every 31.2s) also look
+  // like. Without this the bag cannot tell them apart.
   rclcpp::SerializedMessage serialized;
   pause_serialization_.serialize_message(&event, &serialized);
   write_event_to_bag(

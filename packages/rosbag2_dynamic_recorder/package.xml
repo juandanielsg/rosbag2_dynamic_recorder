@@ -8,8 +8,10 @@
     runtime without stopping the writer or splitting the bag. Writes standard rosbag2 bags through
     rosbag2_cpp::Writer, so ros2 bag play, mcap tooling and Foxglove all keep working.
 
-    See notes/architecture.md for why this is built on Writer rather than on
-    rosbag2_transport::Recorder.
+    Built on Writer rather than on rosbag2_transport::Recorder because Recorder binds its topic
+    set to the static RecordOptions given at construction, and its only reconfiguration path tears
+    down every subscription and closes the bag -- which is exactly the file split this package
+    exists to avoid.
   </description>
   <maintainer email="jdsglez@gmail.com">juandanielsg</maintainer>
   <license>Apache-2.0</license>

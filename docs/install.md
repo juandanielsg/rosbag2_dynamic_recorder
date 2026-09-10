@@ -1,7 +1,8 @@
 # Install
 
-You need **ROS 2 Rolling**. Everything else comes from apt — there is no need to build rosbag2 from
-source, and [installation.md](design/installation.md) records why that is worth insisting on.
+You need **ROS 2 Rolling**. Everything else comes from apt — there is no need to build rosbag2
+from source. That is deliberate: a source build costs forty minutes across 22 packages, and the
+only thing it buys is a service definition this project declares for itself.
 
 ## Full install
 
@@ -75,7 +76,7 @@ Notes worth knowing before you use it:
   have nothing to forward to.
 - It does **not** use `network_mode: host`. On Docker Desktop that is the WSL2 VM's network, which
   the host OS cannot reach.
-- Our packages live in `packages/` and `spike/`, mounted into the workspace separately, so the
-  optional upstream rosbag2 checkout in `src/` stays pristine.
+- Our packages live in `packages/`, mounted into the workspace separately, so the optional
+  upstream rosbag2 checkout in `src/` stays pristine.
 - If you add a package with new dependencies, run
   `rosdep install -r -y --from-paths src --ignore-src` inside the container.

@@ -2,9 +2,9 @@
 #
 # Rationale, and the reason this is separate from SubscriptionChangeEvent: pausing leaves a hole in
 # EVERY topic at once. A bag full of simultaneous gaps is indistinguishable from a crash, a network
-# fault, or the environmental stall characterised in notes/recording-stall.md -- which also shows
-# up as a gap across every topic at the same moment. SubscriptionChangeEvent explains a channel
-# that stops; this explains a bag that stops.
+# fault, or the environmental rosbag2 stall that drops ~1.2s from every topic roughly every 31.2s
+# -- all of which show up as a gap across every topic at the same moment. SubscriptionChangeEvent
+# explains a channel that stops; this explains a bag that stops.
 #
 # Without it the one case the provenance mechanism was built for -- an unexplained gap -- was the
 # one case it did not cover, because stock rosbag2_interfaces/srv/Pause has an empty request and

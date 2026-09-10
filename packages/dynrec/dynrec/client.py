@@ -26,8 +26,9 @@ the graph per client, which is why `Recorder` is meant to be long-lived and is a
 
 **One client per service, created once and kept.** `ros2 dynrec` creates and destroys a client per
 invocation, which is right for a process that exits a moment later and wrong for a script that
-runs for a week. It is also the suspect for the ceiling recorded in notes/roadmap.md, where a
-single rclpy node stopped receiving service responses after roughly 7,000 calls.
+runs for a week. It is also the suspect for a measured ceiling: a single rclpy node stopped
+receiving service responses after roughly 7,000 calls -- reproduced against a pure read touching
+none of the recording path, while an external process queried the same recorder fine.
 
 **Failures raise; partial success does not.** A refused call becomes an exception because a script
 that ignores one has to work at it. But a call that subscribed two topics of three is reported by
@@ -547,8 +548,8 @@ class Recorder:
         """Call `<recorder>/<verb>`, returning the response or raising.
 
         Clients are cached: the same service called a thousand times reuses one client, which is
-        both faster and, on the evidence in notes/roadmap.md, the difference between a script that
-        keeps working and one that quietly stops getting replies.
+        both faster and, past the ~7,000-call ceiling observed on a single rclpy node, the
+        difference between a script that keeps working and one that quietly stops getting replies.
         """
         service = '{}/{}'.format(self.name, verb)
         client = self._client_for(srv_type, service)

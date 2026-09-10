@@ -71,9 +71,10 @@ PAUSED, RESUMED = 0, 1
 
 # In practice the untouched topic's largest gap across two set_topics calls measures 0.05s --
 # exactly one publish interval at 20Hz, i.e. no interruption at all. The bound is loose only
-# because the intermittent stall documented in notes/recording-stall.md costs up to ~1.2s and is
-# not ours: it shows up under stock `ros2 bag record` too. Tightening this would flake for reasons
-# unrelated to the behaviour under test.
+# because an intermittent rosbag2 stall -- ~1.2s lost on every topic at once, roughly every 31.2s
+# -- costs far more than the behaviour does, and is not ours: it shows up under stock
+# `ros2 bag record` too. Tightening this would flake for reasons unrelated to the behaviour under
+# test.
 #
 # Verified non-vacuous: setting this to 0.001 makes the assertion fire and report the real 0.05s.
 MAX_TOLERATED_GAP_S = 2.0

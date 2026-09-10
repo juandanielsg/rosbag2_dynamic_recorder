@@ -259,7 +259,7 @@ def test_active_time_never_exceeds_recorded_time(summary):
 
     Subscribing is not instantaneous: the SUBSCRIBED event is stamped when the subscription is
     created, but the first message cannot arrive until the message definition has been resolved --
-    ~0.4-0.6s by notes/spike-plan.md, plus DDS matching. How long that takes varies with whether
+    ~0.4-0.6s by measurement, plus DDS matching. How long that takes varies with whether
     discovery is already warm, so its size is not worth asserting; that it is never negative, and
     that the rate is measured over the trimmed window, is.
     """
@@ -353,8 +353,9 @@ class TestWithoutEvents:
         summary = describe(bare_bag)
         assert summary.unexplained_gaps, 'a 4s hole in every channel went unreported'
         # *A* pause-sized gap, not the first one. A shared hole of about a second also turns up
-        # from time to time -- the environmental stall characterised in notes/recording-stall.md,
-        # which is not ours and which this reader is right to surface alongside the pause.
+        # from time to time -- the environmental rosbag2 stall, which drops ~1.2s from every
+        # topic at once roughly every 31.2s and shows up under stock `ros2 bag record` too. Not
+        # ours, and this reader is right to surface it alongside the pause.
         pause_sized = [
             (begin, finish) for begin, finish in summary.unexplained_gaps
             if 3.0 < finish - begin < 6.0
