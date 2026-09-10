@@ -88,8 +88,12 @@ autodoc_typehints = 'description'
 
 html_theme = 'furo'
 html_title = 'rosbag2_dynamic_recorder'
-# No html_static_path: there are no custom assets, and an empty _static/ is a directory git will
-# not track -- so it exists locally, vanishes in a fresh clone, and fails the build under -W.
+html_logo = '_static/dynrec_logo.png'
+
+# _static carries the logo and nothing else. Listed here only because it now has real content: an
+# empty _static/ is a directory git will not track, so it exists locally, vanishes in a fresh
+# clone, and fails the build under -W -- which is exactly how the first CI docs build failed.
+html_static_path = ['_static']
 
 REPO = 'https://github.com/juandanielsg/rosbag2_dynamic_recorder'
 BRANCH = 'main'

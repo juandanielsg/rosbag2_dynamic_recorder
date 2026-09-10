@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="docs/_static/dynrec_logo.png" alt="dynrec" width="300">
+</p>
+
 # rosbag2_dynamic_recorder
 
 A ROS 2 bag recorder whose **recorded topic set can change while it is recording** — add a topic,
@@ -6,9 +10,35 @@ drop a topic, or swap the whole set — without stopping the writer and without 
 Recording continues uninterrupted on every topic you did not touch.
 
 **Documentation** lives in [`docs/`](docs/) and builds with Sphinx — the service API, the three
-clients, a generated reference for the Python library, and the design notes. Build it with
+clients, and a generated reference for the Python library. Build it with
 `pip install -r docs/requirements.txt && sphinx-build -b html docs docs/_build/html`, or download
 the `docs-html` artifact from the latest `docs` workflow run.
+
+## ROS 2 compatibility
+
+Developed against **Rolling**, and at present Rolling only. Every push builds all five packages and
+runs the full suite — 187 tests — against `ros:rolling-ros-base` in CI.
+
+| Distro | Status | What happens |
+|---|---|---|
+| **Rolling** | **Supported** | Builds and passes the whole suite in CI on every push |
+| **Kilted** | **Does not build** | `ament_cmake_ros_core` is there, but not the `ament_cmake_ros_core::ament_ros_defaults` target that Rolling exports |
+| **Jazzy** (LTS) | **Does not build** | `ament_cmake_ros_core` is not shipped at all, so `find_package` fails outright |
+| **Humble** (LTS) | **Not tested** | Older than Jazzy, which already fails on a package Humble does not ship either |
+
+Kilted and Jazzy were measured rather than assumed — `colcon build` in `ros:kilted-ros-base` and
+`ros:jazzy-ros-base` fails exactly as described. Humble is the one row here that is an expectation
+and not a result.
+
+The cause is deliberate rather than accidental. Rolling removed `ament_target_dependencies()`, so
+the recorder links the exported namespaced targets directly — the approach `rosbag2_examples_cpp`
+takes, and the right one to track on Rolling. It is also precisely what an older distribution
+cannot resolve.
+
+How much work a backport would be is genuinely unknown: the build stops during CMake generation,
+before a single line of this project is compiled, so nothing beyond that point has been exercised
+on any other distribution. Do not read "does not build" as "one CMake edit away" — it might be, and
+nobody has checked.
 
 ## Why
 
