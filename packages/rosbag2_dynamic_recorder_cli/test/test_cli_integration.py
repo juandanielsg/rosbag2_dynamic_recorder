@@ -67,17 +67,30 @@ class Publishers(Node):
             pub.publish(String(data=str(self._seq)))
 
 
+#: How long each `ros2 dynrec` invocation may spend finding the recorder on the graph.
+#:
+#: A budget, not an assertion. Nothing here checks that discovery is fast -- only that the CLI
+#: does the right thing once it has found the recorder. It is shortened from the CLI's own default
+#: because every call is a fresh process that must discover the graph for itself, so a full second
+#: apiece dominates this suite's runtime.
+#:
+#: The assumption behind a short budget is that the recorder is already up, which is true. It is
+#: also not sufficient: a fresh process still has to find it, and on a shared CI runner 0.5s does
+#: not always suffice -- these tests failed there with "no rosbag2_dynamic_recorder found on the
+#: graph". Raise it in that environment with DYNREC_TEST_SPIN_TIME instead of slowing every local
+#: run to the speed of the slowest machine that will ever run this.
+SPIN_TIME = os.environ.get('DYNREC_TEST_SPIN_TIME', '0.5')
+
+
 def dynrec(*args, timeout=60):
     """Run `ros2 dynrec ...` and return the CompletedProcess.
 
-    --spin-time is shortened from the default because the recorder is already up by the time any
-    of these run, and a full second of discovery per invocation dominates the test's runtime. It
-    is only meaningful on a verb, so it is left off when the first argument is an option such as
-    --help.
+    --spin-time is only meaningful on a verb, so it is left off when the first argument is an
+    option such as --help. See SPIN_TIME for what the value is and why it is tunable.
     """
     ros2 = shutil.which('ros2')
     assert ros2, 'ros2 is not on PATH; is the workspace sourced?'
-    tuning = [] if args[0].startswith('-') else ['--spin-time', '0.5']
+    tuning = [] if args[0].startswith('-') else ['--spin-time', SPIN_TIME]
     return subprocess.run(
         [ros2, 'dynrec', *args, *tuning],
         env=dict(os.environ, ROS_DOMAIN_ID=TEST_DOMAIN_ID),

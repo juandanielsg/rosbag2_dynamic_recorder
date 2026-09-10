@@ -73,6 +73,13 @@ jobs:
       # test` exits 0 when tests fail and only the separate test-result step notices, which is a
       # long way to travel to find out something is broken.
       - name: Test
+        # A shared runner is slower at DDS discovery than a developer machine, and the CLI suite
+        # spends a fresh process per invocation finding the recorder. Its default 0.5s budget is
+        # right locally and too tight here -- measured, as four tests failing with "no
+        # rosbag2_dynamic_recorder found on the graph". This widens the budget rather than
+        # loosening anything the tests actually assert.
+        env:
+          DYNREC_TEST_SPIN_TIME: '3'
         run: |
           set -ex
           . /opt/ros/rolling/setup.sh
