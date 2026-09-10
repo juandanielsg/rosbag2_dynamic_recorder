@@ -47,6 +47,10 @@ extensions = [
     'myst_parser',
     'sphinx.ext.autodoc',
     'sphinx.ext.viewcode',
+    # Writes .nojekyll into the output. Without it GitHub Pages may run the build through Jekyll,
+    # which ignores directories beginning with an underscore -- and _static/ is where the theme's
+    # CSS and this project's logo live, so the site would come out unstyled and logo-less.
+    'sphinx.ext.githubpages',
 ]
 
 # Markdown throughout, because every existing document in this repository is Markdown. A
@@ -57,8 +61,8 @@ myst_enable_extensions = [
     'colon_fence',
     'deflist',
 ]
-# The notes use ## and ### freely; without this, their sub-headings produce no anchors and the
-# in-page navigation for a 28,000-word roadmap is useless.
+# Give sub-headings anchors down to h3, so the longer pages can be deep-linked and their
+# in-page navigation works rather than listing only top-level sections.
 myst_heading_anchors = 3
 
 exclude_patterns = ['_build', 'Thumbs.db', '.DS_Store', 'README.md']

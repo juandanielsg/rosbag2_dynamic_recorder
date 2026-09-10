@@ -1,9 +1,8 @@
-# Builds the Sphinx documentation on every push and keeps the HTML as a downloadable artifact.
+# Builds the Sphinx documentation on every push and publishes it to GitHub Pages.
 #
-# It deliberately does NOT publish. GitHub Pages from a private repository needs a paid plan, and
-# this repository is private by choice, so publishing is a decision to take rather than a default
-# to inherit. The `pages` job at the bottom is commented out and is the whole of what turning it
-# on requires -- plus setting Settings > Pages > Source to "GitHub Actions".
+# Pages from a private repository needs a paid plan, which is why this published nothing while the
+# repository was private. It is public now, so the deploy job below is live and the site is the
+# documentation's real home rather than an artifact someone has to know to download.
 #
 # No ROS is installed. `docs/conf.py` mocks rclpy and the interface packages, which works only
 # because the library keeps its ROS imports in one module and resolves `Recorder` lazily. That is
@@ -19,6 +18,8 @@ on:
 
 permissions:
   contents: read
+  pages: write
+  id-token: write
 
 concurrency:
   group: docs-${{ github.ref }}
@@ -45,26 +46,29 @@ jobs:
       - name: Build
         run: sphinx-build -b html -W --keep-going docs docs/_build/html
 
-      - uses: actions/upload-artifact@v4
+      # The Pages-flavoured upload rather than the plain one: it tars the directory in the
+      # layout deploy-pages expects. It is still a downloadable artifact on pull requests, which
+      # do not deploy.
+      - uses: actions/upload-pages-artifact@v3
         with:
-          name: docs-html
           path: docs/_build/html
-          retention-days: 30
 
-# To publish to GitHub Pages instead of only keeping the artifact:
-#   1. Settings > Pages > Source: "GitHub Actions"
-#   2. add `pages: write` and `id-token: write` to the permissions block above
-#   3. uncomment this job, and swap upload-artifact for actions/upload-pages-artifact@v3 above
-#
-# Note that a private repository needs GitHub Pro, Team or Enterprise for Pages to be available at
-# all. On a Free plan the deploy step fails with a plan error, and the repository has to be public.
-#
-#  deploy:
-#    needs: build
-#    runs-on: ubuntu-latest
-#    environment:
-#      name: github-pages
-#      url: ${{ steps.deployment.outputs.page_url }}
-#    steps:
-#      - id: deployment
-#        uses: actions/deploy-pages@v4
+  deploy:
+    needs: build
+    # Only main publishes. A pull request still builds the docs -- that is the check that matters
+    # on a PR -- but deploying one would put unreviewed content on the public site, and a PR from
+    # a fork cannot get the token to do it anyway.
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    # Deployments are not cancelled half-way. The workflow-level group cancels superseded builds,
+    # which is right for a build and wrong for a publish: an interrupted one can leave the live
+    # site mid-update.
+    concurrency:
+      group: pages-deploy
+      cancel-in-progress: false
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4
