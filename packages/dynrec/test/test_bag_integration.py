@@ -62,6 +62,9 @@ PERIOD = 1.0 / TRUE_HZ
 
 TOPICS = ['/dynrec_bag_test/steady', '/dynrec_bag_test/dropped', '/dynrec_bag_test/late']
 
+#: Named explicitly when re-subscribing, so a topic can be added before its publisher is visible.
+TOPIC_TYPE = 'std_msgs/msg/String'
+
 
 class Publishers(Node):
     def __init__(self, context):
@@ -137,6 +140,37 @@ def check_alive(proc):
         raise AssertionError('recorder exited early:\n' + proc.stdout.read())
 
 
+def ensure_recording(rec, topics, timeout=30.0):
+    """Wait until `topics` are really subscribed, subscribing them itself if startup missed them.
+
+    The recorder resolves its `topics:=` parameter once, at startup, and logs whatever is not yet
+    on the graph as unavailable rather than retrying. Two processes finding each other over DDS is
+    a race, and a slow or loaded machine -- a CI container, typically -- loses it: the recorder
+    wins the race to start and loses the race to see the publishers, subscribes nothing, and
+    writes an empty bag. Sleeping longer cannot repair that, because by the time any sleep expires
+    the subscription decision has already been made. That is why the fixed sleep this replaces
+    failed as an empty bag reaching the assertions rather than as a clear error here.
+
+    So ask what is subscribed and add whatever is missing, naming the type explicitly so the call
+    does not depend on the graph either -- the case `add()` documents for a publisher that has not
+    started yet. Retried until `timeout`, because the recorder may still be coming up.
+
+    On a machine that wins the race this returns immediately, having changed nothing.
+    """
+    deadline = time.monotonic() + timeout
+    while True:
+        subscribed = rec.topics()
+        missing = [topic for topic in topics if topic not in subscribed]
+        if not missing:
+            return
+        if time.monotonic() >= deadline:
+            raise AssertionError(
+                'recorder never subscribed {} after {:g}s; it has {}'.format(
+                    missing, timeout, subscribed))
+        rec.add(['{}:{}'.format(topic, TOPIC_TYPE) for topic in missing])
+        time.sleep(0.5)
+
+
 @pytest.fixture(scope='module')
 def shaped_bag(publishers):
     """One bag holding every shape: a steady channel, a dropped one, a late one, and a pause.
@@ -151,9 +185,10 @@ def shaped_bag(publishers):
         time.sleep(4.0)
         check_alive(proc)
         with Recorder('/shaped_recorder', domain_id=DOMAIN) as rec:
+            ensure_recording(rec, TOPICS[:2])
             time.sleep(4.0)
             rec.remove([TOPICS[1]])          # dropped: stops here
-            rec.add([TOPICS[2]])             # late: starts here
+            ensure_recording(rec, [TOPICS[2]])   # late: starts here
             time.sleep(4.0)
             rec.pause()                      # a hole in steady and late at once
             time.sleep(4.0)
@@ -324,6 +359,7 @@ class TestWithoutEvents:
             time.sleep(4.0)
             check_alive(proc)
             with Recorder('/bare_recorder', domain_id=DOMAIN) as rec:
+                ensure_recording(rec, TOPICS[:2])
                 time.sleep(3.0)
                 rec.pause()
                 time.sleep(4.0)
