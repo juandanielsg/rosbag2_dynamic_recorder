@@ -1,4 +1,4 @@
-# Copyright 2026 juandanielsg
+# Copyright 2026 Juan Daniel Suárez González
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.

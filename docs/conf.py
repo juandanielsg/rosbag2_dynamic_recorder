@@ -1,4 +1,4 @@
-# Copyright 2026 juandanielsg
+# Copyright 2026 Juan Daniel Suárez González
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -38,7 +38,7 @@ from datetime import date
 sys.path.insert(0, os.path.abspath('../packages/dynrec'))
 
 project = 'rosbag2_dynamic_recorder'
-author = 'juandanielsg'
+author = 'Juan Daniel Suárez González'
 copyright = '{}, {}'.format(date.today().year, author)
 release = '0.1.0'
 version = '0.1.0'
