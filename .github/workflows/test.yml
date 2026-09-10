@@ -35,10 +35,12 @@ jobs:
     # this is slower than a unit-test job and the timeout has to leave room for a loaded runner.
     timeout-minutes: 30
 
-    env:
-      # Keep DDS discovery on loopback. The tests already isolate themselves on private domain
-      # IDs, so this is belt-and-braces: it stops a runner's network from participating at all.
-      ROS_AUTOMATIC_DISCOVERY_RANGE: LOCALHOST
+    # No ROS_AUTOMATIC_DISCOVERY_RANGE here, deliberately. Setting it to LOCALHOST looks like
+    # sensible isolation and is not: it degrades discovery enough that the CLI tests, which give
+    # `ros2 dynrec` a 0.5s spin window, stop finding the recorder on the graph. Measured -- the
+    # same container passes 39/39 without it and fails 2 with it, and this workflow's first run
+    # failed 5. The suites already isolate themselves on private ROS_DOMAIN_IDs, which is the
+    # isolation that was actually wanted.
 
     steps:
       - uses: actions/checkout@v4
