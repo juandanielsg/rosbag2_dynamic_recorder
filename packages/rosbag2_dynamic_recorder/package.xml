@@ -17,6 +17,13 @@
   <license>Apache-2.0</license>
 
   <buildtool_depend>ament_cmake</buildtool_depend>
+  <!-- Provides ament_cmake_ros_core::ament_ros_defaults, which CMakeLists links into both the
+       library and the executable. Every other find_package here has a matching entry; this one
+       did not. No environment has been found where the omission actually breaks a build, since
+       the ros:rolling images all carry the package already, which is why it went unnoticed.
+       But rosdep installs only what the manifest declares, so building was luck rather than
+       specification. Same tag rosbag2_cpp itself uses. -->
+  <buildtool_depend>ament_cmake_ros_core</buildtool_depend>
 
   <depend>rclcpp</depend>
   <depend>rosbag2_cpp</depend>
