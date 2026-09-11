@@ -214,6 +214,8 @@ def status_dict(status):
         'active_profile': status.active_profile,
         'messages_written': status.messages_written,
         'messages_missed': status.messages_missed if sequence_ok else None,
+        'messages_lost_in_transport': status.messages_lost_in_transport,
+        'messages_lost_in_recorder': status.messages_lost_in_recorder,
         'messages_lost_reported': status.messages_lost,
         'write_errors': status.write_errors,
         'bag_splits': status.bag_splits,
@@ -242,8 +244,10 @@ def format_status(status, recorder_name):
     counters = [
         ('written', str(status.messages_written)),
         ('missed', missed),
-        ('lost', '{} (as reported by the transport, which can miss losses)'.format(
-            status.messages_lost)),
+        ('lost (transport)', '{} (as reported by the transport, which can miss losses)'.format(
+            status.messages_lost_in_transport)),
+        ('lost (recorder)', '{} (dropped by the writer: cache full or write failed)'.format(
+            status.messages_lost_in_recorder)),
         ('write errors', str(status.write_errors)),
         ('splits', str(status.bag_splits)),
         ('on disk', '{} (flushed; the writer caches, so this lags what is captured)'.format(

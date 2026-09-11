@@ -41,6 +41,8 @@ def _status(**overrides):
         messages_written=100,
         messages_missed=0,
         sequence_numbers_available=True,
+        messages_lost_in_transport=0,
+        messages_lost_in_recorder=0,
         messages_lost=0,
         write_errors=0,
         bag_splits=0,
@@ -78,6 +80,16 @@ def test_transport_loss_is_kept_separate():
     assert state["messages_missed"] == 42
     assert state["messages_lost_reported"] == 0
     assert "messages_lost" not in state, "reported loss must stay under its qualified name"
+
+
+def test_writer_loss_and_transport_loss_reach_the_page_separately():
+    """The page labels one 'Dropped by writer' and the other 'Loss reported by transport';
+    the remedies differ, so a merged figure would mislabel a slow disk as a bad network."""
+    state = _state(_status(
+        messages_lost_in_transport=3, messages_lost_in_recorder=8, messages_lost=11))
+    assert state["messages_lost_in_transport"] == 3
+    assert state["messages_lost_in_recorder"] == 8
+    assert state["messages_lost_reported"] == 11
 
 
 def test_disconnected_state_claims_nothing():

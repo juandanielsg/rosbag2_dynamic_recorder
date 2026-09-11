@@ -50,6 +50,8 @@ def _status(**overrides):
         active_profile='small',
         messages_written=1987,
         messages_missed=0,
+        messages_lost_in_transport=0,
+        messages_lost_in_recorder=0,
         messages_lost=0,
         sequence_numbers_available=True,
         write_errors=0,
@@ -80,6 +82,22 @@ def test_reported_losses_are_labelled_as_reported():
     """messages_lost has been observed reading 0 while messages were genuinely absent."""
     rendered = '\n'.join(format_status(_status(), '/rec'))
     assert 'as reported by the transport' in rendered
+
+
+def test_writer_losses_get_their_own_row():
+    """A slow disk must not read as a network problem. The writer's own drops have a local
+    remedy and are shown on a separate line that says what they are."""
+    rendered = format_status(
+        _status(messages_lost_in_transport=1, messages_lost_in_recorder=9, messages_lost=10),
+        '/rec')
+    transport = next(line for line in rendered if line.startswith('lost (transport)'))
+    recorder = next(line for line in rendered if line.startswith('lost (recorder)'))
+    assert '1 ' in transport
+    assert '9 ' in recorder
+    assert 'cache' in recorder
+    data = status_dict(_status(messages_lost_in_transport=1, messages_lost_in_recorder=9))
+    assert data['messages_lost_in_transport'] == 1
+    assert data['messages_lost_in_recorder'] == 9
 
 
 def test_size_on_disk_is_labelled_as_flushed():

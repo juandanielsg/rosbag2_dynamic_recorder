@@ -66,6 +66,8 @@ SAMPLE_STATE = {
     "messages_written": 1234,
     # None on purpose: the page must render this as unknown, and that branch has to be walked.
     "messages_missed": None,
+    "messages_lost_in_transport": 0,
+    "messages_lost_in_recorder": 0,
     "messages_lost_reported": 0,
     "write_errors": 0,
     "bag_splits": 1,

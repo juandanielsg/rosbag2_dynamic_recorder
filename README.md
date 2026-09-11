@@ -314,8 +314,10 @@ forward to.
 The page is one static file served by a ROS node on your machine: no account, cloud, separate
 application or internet, and no web framework or npm build step. It needs `rclpy`,
 `ament_index_python` and the interface packages. Where it cannot measure something it shows
-unknown, not a reassuring zero: on one TurtleBot 4 simulator run, `messages_lost` read 0 while
-3-4% of messages were absent.
+unknown, not a reassuring zero: on one TurtleBot 4 simulator run, `messages_lost_in_transport`
+read 0 while 3-4% of messages were absent. Losses the writer itself drops, because the disk cannot
+keep up, are shown on their own line: the remedy is local and the page should not send you to
+debug the network.
 
 ## Parameters
 
@@ -327,7 +329,12 @@ unknown, not a reassuring zero: on one TurtleBot 4 simulator run, `messages_lost
 | `topics` | `[]` | Topics to subscribe at startup. |
 | `start_paused` | `false` | Start with recording paused. |
 | `snapshot_mode` | `false` | Buffer in memory, write only on `~/snapshot`. |
-| `max_cache_size` | `104857600` | Writer cache in bytes. Must be > 0 for `snapshot_mode`. |
+| `max_cache_size` | `104857600` | Writer cache in bytes. `snapshot_mode` needs this or `max_cache_duration` > 0. |
+| `max_cache_duration` | `0` | Writer cache bound in seconds; `0` for none. Combines with `max_cache_size`. |
+| `max_bagfile_size` | `0` | Split when a file reaches this many bytes; `0` never. |
+| `max_bagfile_duration` | `0` | Split every this many seconds; `0` never. |
+| `storage_preset_profile` | *(empty)* | Storage plugin preset. mcap: `none`, `fastwrite`, `zstd_fast`, `zstd_small`. |
+| `storage_config_uri` | *(empty)* | Storage plugin YAML, overlaid on the preset. |
 | `record_subscription_events` | `true` | Write subscription changes into the bag. |
 | `record_pause_events` | `true` | Write pauses and resumes into the bag. |
 | `messages_lost_report_period` | `5.0` | Seconds between `MessagesLostEvent`. `0` disables. |

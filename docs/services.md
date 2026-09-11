@@ -103,10 +103,21 @@ A few fields need reading carefully:
   the recorder ever saw them. Meaningful only when `sequence_numbers_available` is true; treat it as
   unknown, not zero, when that is false.
 
+`messages_lost_in_transport`
+: What the transport reported as dropped before delivery. Observed reading 0 while roughly 3–4% of
+  messages were absent from a bag. Treat it as a floor, not a total. A large `messages_missed` with
+  this at 0 means the recorder was blocked long enough for publisher history to overflow. When this
+  is the figure that climbs, the remedy is on the publisher's side: its QoS, the network, or load.
+
+`messages_lost_in_recorder`
+: Messages that did reach the recorder and were then dropped by the writer, because the cache filled
+  while the disk could not keep up or because a storage write failed. Known with certainty, and the
+  remedy is local: `max_cache_size` or `max_cache_duration`, a lighter `storage_preset_profile`,
+  fewer or lighter topics, or faster storage. The name matches the same field in rosbag2's own
+  `MessagesLostEvent`, which `~/events/messages_lost` also now fills correctly.
+
 `messages_lost`
-: What the transport or writer reported. Observed reading 0 while roughly 3–4% of messages were
-  absent from a bag. Treat it as a floor, not a total. A large `messages_missed` with this at 0 means
-  the recorder was blocked long enough for publisher history to overflow.
+: The two above summed, for anything that only wants a total. Inherits the transport caveat.
 
 `bag_size_bytes`
 : Bytes flushed to disk, not bytes captured. The writer caches, so this reads 0 early in a perfectly
@@ -187,15 +198,30 @@ A worked example using the TurtleBot 4 simulator's topics ships at
 | `topics` | `[]` | Topics to subscribe at startup. |
 | `start_paused` | `false` | Start with recording paused. |
 | `snapshot_mode` | `false` | Buffer in memory, write only on `~/snapshot`. |
-| `max_cache_size` | `104857600` | Writer cache in bytes. Must be > 0 for `snapshot_mode`. |
+| `max_cache_size` | `104857600` | Writer cache in bytes. `snapshot_mode` needs this or `max_cache_duration` > 0. |
+| `max_cache_duration` | `0` | Writer cache bound in seconds; `0` for none. Combines with `max_cache_size`. |
+| `max_bagfile_size` | `0` | Split when a file reaches this many bytes; `0` never. |
+| `max_bagfile_duration` | `0` | Split every this many seconds; `0` never. |
+| `storage_preset_profile` | *(empty)* | Storage plugin preset. mcap: `none`, `fastwrite`, `zstd_fast`, `zstd_small`. |
+| `storage_config_uri` | *(empty)* | Storage plugin YAML, overlaid on the preset. |
 | `record_subscription_events` | `true` | Write subscription changes into the bag. |
 | `record_pause_events` | `true` | Write pauses and resumes into the bag. |
 | `messages_lost_report_period` | `5.0` | Seconds between `MessagesLostEvent`. `0` disables. |
 | `status_publish_period` | `1.0` | Seconds between `~/status` publications. |
 | `profile_names` | `[]` | Names of the declared profiles. |
 
+The five storage settings after `max_cache_size` are rosbag2's own `StorageOptions`, passed
+through untouched. They matter most on a small computer writing to an SD card. When
+`messages_lost_in_recorder` climbs, the disk is not keeping up: `max_cache_duration` bounds how
+much recording is at risk in terms an operator can reason about; `storage_preset_profile:=fastwrite`
+cuts the per-message CPU cost; the `zstd_*` presets spend CPU to reduce disk bandwidth, which on a
+slow card with a spare core is a net gain; and a size or duration split keeps any one file small
+enough to survive a crash. With `max_cache_size` and `max_cache_duration` both `0` every message is
+written synchronously from its callback, which is what makes publishers overwrite their own
+history unseen — the recorder warns once at startup if you do that.
+
 These are node parameters. The launch files forward only some of them: `uri`, `storage_id`,
-`serialization_format`, `topics`, `start_paused`, `snapshot_mode`, `max_cache_size`,
+`serialization_format`, `topics`, `start_paused`, `snapshot_mode`, the six storage settings,
 `record_subscription_events` and `messages_lost_report_period`. Set `record_pause_events`,
 `status_publish_period`, `profile_names` and the profiles themselves through `params_file` (or
 `-p name:=value` when running the node directly). The full argument list is in

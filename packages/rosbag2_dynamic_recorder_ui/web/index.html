@@ -541,7 +541,9 @@ function renderDetail(s) {
     <tr><td>Messages missing</td><td>${missed}</td></tr>
     <tr><td>Failed writes</td><td>${fmtInt(s.write_errors)}
       <div class="caveat">Messages that arrived but could not be written, usually a full disk. Unlike the two figures above these are known-lost with certainty.</div></td></tr>
-    <tr><td>Loss reported by transport</td><td>${fmtInt(s.messages_lost_reported)}
+    <tr><td>Dropped by writer</td><td>${fmtInt(s.messages_lost_in_recorder)}
+      <div class="caveat">Arrived, then dropped because the write cache was full or a write failed. The disk is not keeping up: a larger cache, a lighter storage preset, or fewer topics are the remedies.</div></td></tr>
+    <tr><td>Loss reported by transport</td><td>${fmtInt(s.messages_lost_in_transport)}
       <div class="caveat">Only what the transport chose to report. Observed reading 0 while messages were genuinely absent, so it is not a guarantee.</div></td></tr>
     <tr><td>Files written</td><td>${s.bag_splits + 1}</td></tr>
     <tr><td>Size on disk</td><td>${fmtBytes(s.bag_size_bytes)}

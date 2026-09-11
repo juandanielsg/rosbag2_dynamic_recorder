@@ -64,7 +64,11 @@ and the most consequential: a person reading a CLI number might notice, but code
 number against a threshold will not.
 
 `messages_lost_reported` is renamed on the way out for the same reason. It counts only what the
-transport admitted to, and has read 0 against a bag that was genuinely missing 3–4% of its messages.
+transport and the writer admitted to, and has read 0 against a bag that was genuinely missing 3–4%
+of its messages. Its two halves are also exposed separately: `messages_lost_in_transport` is the
+transport's report and shares that caveat; `messages_lost_in_recorder` is the writer's own drops
+(cache full, or a write that failed) and is known with certainty. A script deciding whether the
+disk is keeping up should look at the second, not the sum.
 
 ## 3. It can watch
 

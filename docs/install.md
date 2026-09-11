@@ -38,7 +38,12 @@ ros2 launch rosbag2_dynamic_recorder dynamic_recorder.launch.py \
 | `topics` | `[]` | Topics to record at startup, as a YAML list. May be empty. |
 | `start_paused` | `false` | Start with recording paused. |
 | `snapshot_mode` | `false` | Buffer in memory and write only on `~/snapshot`. |
-| `max_cache_size` | `104857600` | Writer cache in bytes. `snapshot_mode` requires it to be > 0. |
+| `max_cache_size` | `104857600` | Writer cache in bytes. `snapshot_mode` needs this or `max_cache_duration` > 0. |
+| `max_cache_duration` | `0` | Writer cache bound in seconds; `0` for none. Combines with `max_cache_size`. |
+| `max_bagfile_size` | `0` | Split when a file reaches this many bytes; `0` never. |
+| `max_bagfile_duration` | `0` | Split every this many seconds; `0` never. |
+| `storage_preset_profile` | *(empty)* | Storage plugin preset. mcap: `none`, `fastwrite`, `zstd_fast`, `zstd_small`. |
+| `storage_config_uri` | *(empty)* | Storage plugin YAML, overlaid on the preset. |
 | `record_subscription_events` | `true` | Write subscription changes into the bag. |
 | `messages_lost_report_period` | `5.0` | Seconds between `MessagesLostEvent`. `0` disables. |
 | `params_file` | *(empty)* | Optional YAML of extra parameters, e.g. profiles. |

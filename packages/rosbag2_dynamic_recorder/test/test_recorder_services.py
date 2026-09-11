@@ -470,6 +470,47 @@ def test_status_never_claims_loss_it_cannot_measure(recorder):
     assert status.messages_missed >= 0
 
 
+def test_loss_is_reported_by_origin_and_the_total_is_their_sum(recorder):
+    """Transport loss and writer loss have opposite remedies, so the status carries both, and
+    the legacy total is exactly their sum rather than a third number that could drift."""
+    harness, _ = recorder
+    harness.call(SubscribeTopics, "subscribe_topics", topics=[TOPICS[0]])
+    harness.spin_for(2.0)
+    status = harness.status()
+    assert status.messages_lost == (
+        status.messages_lost_in_transport + status.messages_lost_in_recorder)
+
+
+def test_storage_options_reach_the_writer():
+    """max_bagfile_duration is passed straight to rosbag2, so a one-second limit shows up as a
+    split the recorder counts. Proves the pass-through rather than the parameter declaration."""
+    harness, _, cleanup = _start_recorder(("-p", "max_bagfile_duration:=1"))
+    try:
+        harness.call(SubscribeTopics, "subscribe_topics", topics=[TOPICS[0]])
+        harness.spin_for(4.0)
+        assert harness.status().bag_splits >= 1, "the duration limit never split the bag"
+    finally:
+        cleanup()
+
+
+def test_snapshot_mode_accepts_a_duration_bound_alone():
+    """The writer treats a duration-limited cache as a valid buffer, so snapshot_mode must not
+    insist on max_cache_size when max_cache_duration is set."""
+    harness, _, cleanup = _start_recorder((
+        "-p", "snapshot_mode:=true", "-p", "max_cache_size:=0", "-p", "max_cache_duration:=2"))
+    try:
+        assert harness.status().snapshot_mode is True
+    finally:
+        cleanup()
+
+
+def test_unknown_storage_preset_is_refused_at_startup():
+    """A typo in the preset is a configuration error, and it should fail before a bag exists
+    rather than record on defaults while claiming otherwise."""
+    with pytest.raises(AssertionError, match="exited early"):
+        _start_recorder(("-p", "storage_preset_profile:=fastwrit"))
+
+
 def read_bag(uri):
     """Return per-topic receive timestamps (seconds, bag-relative) and the recorded events."""
     reader = SequentialReader()

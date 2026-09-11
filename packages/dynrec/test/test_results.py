@@ -43,6 +43,8 @@ def status_msg(**overrides):
         subscribed_topics=['/scan', '/odom'],
         active_profile='small',
         messages_written=1000,
+        messages_lost_in_transport=0,
+        messages_lost_in_recorder=0,
         messages_lost=0,
         messages_missed=7,
         sequence_numbers_available=True,
@@ -74,6 +76,21 @@ def test_reported_losses_keep_their_name():
     status = Status.from_msg(status_msg(messages_lost=3))
     assert status.messages_lost_reported == 3
     assert not hasattr(status, 'messages_lost')
+
+
+def test_writer_losses_are_kept_apart_from_transport_losses():
+    """The two have opposite remedies. Transport loss points at the publisher or the network;
+    writer loss -- the cache filled because the disk could not keep up -- points at the cache,
+    the storage preset, or the topic set. A single total would send someone on a slow SD card off
+    to debug the network."""
+    status = Status.from_msg(status_msg(
+        messages_lost_in_transport=2, messages_lost_in_recorder=5, messages_lost=7))
+    assert status.messages_lost_in_transport == 2
+    assert status.messages_lost_in_recorder == 5
+    assert status.messages_lost_reported == 7
+    as_dict = status.as_dict()
+    assert as_dict['messages_lost_in_transport'] == 2
+    assert as_dict['messages_lost_in_recorder'] == 5
 
 
 def test_recording_started_is_seconds_on_the_recorder_clock():

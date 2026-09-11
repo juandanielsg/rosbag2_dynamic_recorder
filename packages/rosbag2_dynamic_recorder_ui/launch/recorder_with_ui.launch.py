@@ -38,7 +38,17 @@ ARGUMENTS = [
     ('serialization_format', 'cdr', 'Message serialization format.'),
     ('start_paused', 'false', 'Start with recording paused.'),
     ('snapshot_mode', 'false', 'Buffer in memory and only write on request.'),
-    ('max_cache_size', '104857600', 'Writer cache in bytes. Required by snapshot_mode.'),
+    ('max_cache_size', '104857600',
+     'Writer cache in bytes. snapshot_mode needs this or max_cache_duration to be > 0.'),
+    ('max_cache_duration', '0',
+     'Writer cache bound in seconds; 0 for none. Combines with max_cache_size. A bound an '
+     'operator can reason about: at most this much recording is at risk if the process dies.'),
+    ('max_bagfile_size', '0', 'Split the bag when a file reaches this many bytes; 0 never.'),
+    ('max_bagfile_duration', '0', 'Split the bag every this many seconds; 0 never.'),
+    ('storage_preset_profile', '',
+     'Storage plugin preset. For mcap: none, fastwrite, zstd_fast, zstd_small. fastwrite is '
+     'the one for a weak CPU; the zstd presets trade CPU for disk bandwidth.'),
+    ('storage_config_uri', '', 'Path to a storage-plugin YAML, overlaid on the preset.'),
     ('record_subscription_events', 'true',
      'Record SubscriptionChangeEvent into the bag, so sparse channels explain themselves.'),
     ('messages_lost_report_period', '5.0',
@@ -78,6 +88,13 @@ def recorder_parameters(context):
         'start_paused': LaunchConfiguration('start_paused').perform(context) == 'true',
         'snapshot_mode': LaunchConfiguration('snapshot_mode').perform(context) == 'true',
         'max_cache_size': int(LaunchConfiguration('max_cache_size').perform(context)),
+        'max_cache_duration': int(LaunchConfiguration('max_cache_duration').perform(context)),
+        'max_bagfile_size': int(LaunchConfiguration('max_bagfile_size').perform(context)),
+        'max_bagfile_duration':
+            int(LaunchConfiguration('max_bagfile_duration').perform(context)),
+        'storage_preset_profile':
+            LaunchConfiguration('storage_preset_profile').perform(context),
+        'storage_config_uri': LaunchConfiguration('storage_config_uri').perform(context),
         'record_subscription_events':
             LaunchConfiguration('record_subscription_events').perform(context) == 'true',
         'messages_lost_report_period':

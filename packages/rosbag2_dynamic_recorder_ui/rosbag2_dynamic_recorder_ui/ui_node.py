@@ -87,8 +87,10 @@ def build_state(status, age, recorder, available_topics, events):
     Kept out of the Node so it can be tested without a ROS graph, because the rule it encodes is
     the one most worth protecting: a field the recorder cannot vouch for is reported as unknown,
     never as a convenient zero. `messages_missed` is only meaningful when the middleware supplies
-    publication sequence numbers, and `messages_lost` counts only what the transport chose to
-    report -- which has been observed reading 0 while messages were genuinely absent from a bag.
+    publication sequence numbers, and `messages_lost_in_transport` counts only what the transport
+    chose to report -- which has been observed reading 0 while messages were genuinely absent from
+    a bag. `messages_lost_in_recorder` is the writer's own drops, and is kept separate because it
+    has a local remedy (cache, storage preset, topic set, disk) where the transport figure does not.
     """
     if status is None:
         return {
@@ -120,6 +122,8 @@ def build_state(status, age, recorder, available_topics, events):
         "messages_written": status.messages_written,
         # None means "cannot tell". The page renders that as unknown rather than as zero.
         "messages_missed": status.messages_missed if sequence_ok else None,
+        "messages_lost_in_transport": status.messages_lost_in_transport,
+        "messages_lost_in_recorder": status.messages_lost_in_recorder,
         "messages_lost_reported": status.messages_lost,
         "write_errors": status.write_errors,
         "bag_splits": status.bag_splits,

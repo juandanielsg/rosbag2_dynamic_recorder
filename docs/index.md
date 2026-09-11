@@ -50,7 +50,13 @@ what keeps it honest.
 ## One caveat, carried everywhere
 
 Numbers the recorder cannot vouch for are reported as unknown, never as zero. `messages_missed` is
-meaningful only when the middleware supplies publication sequence numbers; `messages_lost` counts
-only what the transport chose to report, and has been observed reading 0 while roughly 3–4% of
-messages were genuinely absent. Every interface here (the services, `--json`, the library's
+meaningful only when the middleware supplies publication sequence numbers; `messages_lost_in_transport`
+counts only what the transport chose to report, and has been observed reading 0 while roughly 3–4%
+of messages were genuinely absent. Every interface here (the services, `--json`, the library's
 `Status`, the browser UI) keeps that distinction rather than flattening it to zero.
+
+Losses are also kept apart by where they happened. `messages_lost_in_recorder` is the writer's own
+drops — the cache filled because the disk could not keep up — and it is reported on its own line
+rather than folded into the transport figure, because the two have opposite remedies: one points at
+the publisher or the network, the other at the cache size, the storage preset, the topic set, or
+the disk. On a small computer writing to an SD card it is the number to watch.

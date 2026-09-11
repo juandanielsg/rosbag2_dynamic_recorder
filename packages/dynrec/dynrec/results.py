@@ -63,8 +63,15 @@ class Status:
     #: None when the middleware supplies no publication sequence numbers, i.e. when the recorder
     #: genuinely cannot tell. Never zero in that case -- zero would be a claim it cannot make.
     messages_missed: Optional[int]
-    #: Losses the transport or writer *reported*. Observed reading 0 while ~3-4% of messages were
-    #: absent from a bag, so it is a floor, not a total. `messages_missed` is the honest one.
+    #: Losses the transport *reported* before delivery. Observed reading 0 while ~3-4% of messages
+    #: were absent from a bag, so it is a floor, not a total. `messages_missed` is the honest one.
+    #: When this climbs, look at the publisher, its QoS, or the network.
+    messages_lost_in_transport: int
+    #: Messages that reached the recorder and were then dropped by the writer: cache overflow
+    #: because the disk could not keep up, or a failed storage write. Known-lost with certainty,
+    #: and the remedy is local -- cache size or duration, storage preset, topic set, or the disk.
+    messages_lost_in_recorder: int
+    #: The two above summed, for callers that only want a total. Inherits the transport caveat.
     messages_lost_reported: int
     write_errors: int
     bag_splits: int
@@ -89,6 +96,8 @@ class Status:
             active_profile=msg.active_profile,
             messages_written=msg.messages_written,
             messages_missed=msg.messages_missed if sequence_ok else None,
+            messages_lost_in_transport=msg.messages_lost_in_transport,
+            messages_lost_in_recorder=msg.messages_lost_in_recorder,
             messages_lost_reported=msg.messages_lost,
             write_errors=msg.write_errors,
             bag_splits=msg.bag_splits,
@@ -110,6 +119,8 @@ class Status:
             'active_profile': self.active_profile,
             'messages_written': self.messages_written,
             'messages_missed': self.messages_missed,
+            'messages_lost_in_transport': self.messages_lost_in_transport,
+            'messages_lost_in_recorder': self.messages_lost_in_recorder,
             'messages_lost_reported': self.messages_lost_reported,
             'write_errors': self.write_errors,
             'bag_splits': self.bag_splits,

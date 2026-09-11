@@ -39,14 +39,31 @@ string active_profile
 # Messages written to the bag since startup, including the recorder's own event messages.
 uint64 messages_written
 
-# Messages the transport or the writer REPORTED as lost.
+# Messages the transport REPORTED as dropped before they reached the recorder.
 #
-# WARNING: this is reported losses, not actual losses. Messages can go missing without either
-# layer raising an event -- observed on a TurtleBot 4 run where this field read 0 while roughly
+# WARNING: this is reported losses, not actual losses. Messages can go missing without the
+# transport raising an event -- observed on a TurtleBot 4 run where this read 0 while roughly
 # 3-4% of messages were absent from the bag. The mechanism: publishers at KEEP_LAST(10) overwrite
 # their history while the recorder's callback thread is blocked, so those samples are never
 # delivered and no reader-side loss event can fire. Do not present this to a user as a guarantee
 # that nothing was lost.
+#
+# When this is the figure that climbs, the remedy is on the far side of the recorder: the
+# publisher's QoS, the network, or the load on the publishing machine.
+uint64 messages_lost_in_transport
+
+# Messages that DID reach the recorder and were then dropped by the writer: the cache filled
+# because the disk could not keep up, or a storage write failed. Named after the same field in
+# rosbag2's own MessagesLostEvent.
+#
+# Unlike messages_lost_in_transport these are known-lost with certainty, and the remedy is local:
+# a larger or longer writer cache (max_cache_size, max_cache_duration), a lighter storage preset
+# (storage_preset_profile), fewer or lighter topics, or faster storage. On low-end hardware with
+# an SD card this is the figure to watch.
+uint64 messages_lost_in_recorder
+
+# messages_lost_in_transport + messages_lost_in_recorder, kept for anything that only wants a
+# total. It inherits the transport figure's caveat: a floor, not a count.
 uint64 messages_lost
 
 # Messages DETECTED as missing by watching for gaps in each publisher's sequence numbers.

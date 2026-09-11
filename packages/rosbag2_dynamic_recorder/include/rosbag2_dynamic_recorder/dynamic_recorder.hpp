@@ -112,7 +112,18 @@ public:
   /// Flush the in-memory circular buffer to disk. Requires snapshot_mode.
   bool take_snapshot();
 
-  /// Total messages dropped by the transport layer since startup, across all topics.
+  /// Messages the transport reported as dropped before delivery, summed over all topics.
+  uint64_t messages_lost_in_transport() const;
+
+  /// Messages that reached the recorder and were then dropped by the writer -- cache overflow
+  /// when the disk cannot keep up, or a storage write that failed -- summed over all topics.
+  ///
+  /// Kept apart from the transport figure because the remedies are opposite: transport loss
+  /// points at the publisher, QoS, or the network; recorder loss points at the cache size, the
+  /// storage preset, the topic set, or the disk.
+  uint64_t messages_lost_in_recorder() const;
+
+  /// messages_lost_in_transport() + messages_lost_in_recorder().
   uint64_t total_messages_lost() const;
 
   /// Messages detected as missing via gaps in publisher sequence numbers. Independent of whether
@@ -376,9 +387,16 @@ private:
   std::atomic_uint64_t messages_missed_{0};
   std::atomic_bool sequence_numbers_available_{false};
 
-  /// Per-topic transport-layer losses accumulated since the last MessagesLostEvent.
-  std::unordered_map<std::string, uint64_t> messages_lost_since_last_event_;
-  std::atomic_uint64_t total_messages_lost_{0};
+  /// Losses on one topic since the last MessagesLostEvent, kept by origin so the event can fill
+  /// both of rosbag2's per-topic fields rather than filing everything under transport.
+  struct LostCounts
+  {
+    uint64_t in_transport{0};
+    uint64_t in_recorder{0};
+  };
+  std::unordered_map<std::string, LostCounts> messages_lost_since_last_event_;
+  std::atomic_uint64_t messages_lost_in_transport_{0};
+  std::atomic_uint64_t messages_lost_in_recorder_{0};
   std::mutex messages_lost_mutex_;
   rclcpp::TimerBase::SharedPtr messages_lost_timer_;
 

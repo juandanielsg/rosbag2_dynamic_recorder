@@ -73,6 +73,25 @@ DynamicRecorder::DynamicRecorder(const rclcpp::NodeOptions & options)
   record_pause_events_ = declare_parameter<bool>("record_pause_events", true);
   snapshot_mode_ = declare_parameter<bool>("snapshot_mode", false);
   const auto max_cache_size = declare_parameter<int64_t>("max_cache_size", 100 * 1024 * 1024);
+  // The rest of rosbag2's StorageOptions, passed through untouched. These are the knobs that
+  // decide whether a small computer keeps up: a time-bounded cache is something an operator can
+  // reason about where "100 MB" is not, and the MCAP presets trade CPU against disk bandwidth in
+  // either direction. Without them the writer runs on defaults that nothing here can change.
+  const auto max_cache_duration = declare_parameter<int64_t>("max_cache_duration", 0);
+  const auto max_bagfile_size = declare_parameter<int64_t>("max_bagfile_size", 0);
+  const auto max_bagfile_duration = declare_parameter<int64_t>("max_bagfile_duration", 0);
+  const auto storage_preset_profile = declare_parameter<std::string>("storage_preset_profile", "");
+  const auto storage_config_uri = declare_parameter<std::string>("storage_config_uri", "");
+  const std::pair<const char *, int64_t> non_negative[] = {
+    {"max_cache_size", max_cache_size},
+    {"max_cache_duration", max_cache_duration},
+    {"max_bagfile_size", max_bagfile_size},
+    {"max_bagfile_duration", max_bagfile_duration}};
+  for (const auto & [name, value] : non_negative) {
+    if (value < 0) {
+      throw std::invalid_argument(std::string(name) + " must be >= 0");
+    }
+  }
   const auto messages_lost_report_period_s =
     declare_parameter<double>("messages_lost_report_period", 5.0);
   const auto status_publish_period_s = declare_parameter<double>("status_publish_period", 1.0);
@@ -112,10 +131,19 @@ DynamicRecorder::DynamicRecorder(const rclcpp::NodeOptions & options)
   storage_options_.storage_id = storage_id;
   storage_options_.snapshot_mode = snapshot_mode_;
   // Snapshot mode is a circular buffer flushed on demand, so it is meaningless without a cache.
+  // The writer accepts either bound: a cache limited only by duration is a valid buffer.
   storage_options_.max_cache_size = static_cast<uint64_t>(max_cache_size);
-  if (snapshot_mode_ && storage_options_.max_cache_size == 0) {
-    throw std::invalid_argument("snapshot_mode requires max_cache_size > 0");
+  storage_options_.max_cache_duration = static_cast<uint32_t>(max_cache_duration);
+  if (snapshot_mode_ && storage_options_.max_cache_size == 0 &&
+    storage_options_.max_cache_duration == 0)
+  {
+    throw std::invalid_argument(
+      "snapshot_mode requires max_cache_size > 0 or max_cache_duration > 0");
   }
+  storage_options_.max_bagfile_size = static_cast<uint64_t>(max_bagfile_size);
+  storage_options_.max_bagfile_duration = static_cast<uint64_t>(max_bagfile_duration);
+  storage_options_.storage_preset_profile = storage_preset_profile;
+  storage_options_.storage_config_uri = storage_config_uri;
 
   converter_options_.input_serialization_format = serialization_format_;
   converter_options_.output_serialization_format = serialization_format_;
@@ -125,9 +153,20 @@ DynamicRecorder::DynamicRecorder(const rclcpp::NodeOptions & options)
   recording_ = true;
   recording_started_ = now();
   setup_writer_events();
-  RCLCPP_INFO(get_logger(), "Recording to '%s' (storage_id=%s)%s%s", uri.c_str(),
-    storage_id.c_str(), snapshot_mode_ ? " [snapshot mode]" : "",
+  RCLCPP_INFO(get_logger(), "Recording to '%s' (storage_id=%s%s%s)%s%s", uri.c_str(),
+    storage_id.c_str(),
+    storage_preset_profile.empty() ? "" : ", preset=",
+    storage_preset_profile.c_str(),
+    snapshot_mode_ ? " [snapshot mode]" : "",
     paused_.load() ? " [started paused]" : "");
+  if (storage_options_.max_cache_size == 0 && storage_options_.max_cache_duration == 0) {
+    // Synchronous writes hold the subscription callback for the duration of each disk write.
+    // That is exactly the condition under which publishers overwrite their own history unseen,
+    // so say so once rather than let it show up later as an unexplained messages_missed.
+    RCLCPP_WARN(get_logger(),
+      "max_cache_size and max_cache_duration are both 0: every message is written synchronously "
+      "from its callback, which on slow storage blocks delivery and loses messages nothing reports");
+  }
 
   // Services get their own callback group. Adding a topic costs ~0.5s, almost all of it message
   // definition resolution inside create_topic(); keeping that off the group that runs subscription
@@ -255,11 +294,11 @@ DynamicRecorder::DynamicRecorder(const rclcpp::NodeOptions & options)
           if (messages_lost_since_last_event_.empty()) {
             return;  // Topics with no losses are not reported, matching the upstream contract.
           }
-          for (const auto & [topic_name, count] : messages_lost_since_last_event_) {
+          for (const auto & [topic_name, counts] : messages_lost_since_last_event_) {
             rosbag2_interfaces::msg::MessagesLostEventTopicStat stat;
             stat.topic_name = topic_name;
-            stat.messages_lost_in_transport = count;
-            stat.messages_lost_in_recorder = 0;
+            stat.messages_lost_in_transport = counts.in_transport;
+            stat.messages_lost_in_recorder = counts.in_recorder;
             event.messages_lost_statistics.push_back(stat);
           }
           messages_lost_since_last_event_.clear();
@@ -440,9 +479,9 @@ bool DynamicRecorder::subscribe_topic(
   rclcpp::SubscriptionOptions subscription_options;
   subscription_options.event_callbacks.message_lost_callback =
     [this, topic_name](const rclcpp::QOSMessageLostInfo & info) {
-      total_messages_lost_.fetch_add(info.total_count_change);
+      messages_lost_in_transport_.fetch_add(info.total_count_change);
       std::lock_guard<std::mutex> lock(messages_lost_mutex_);
-      messages_lost_since_last_event_[topic_name] += info.total_count_change;
+      messages_lost_since_last_event_[topic_name].in_transport += info.total_count_change;
     };
   auto callback =
     [this, topic_name, topic_type](
@@ -859,14 +898,17 @@ void DynamicRecorder::setup_writer_events()
       RCLCPP_INFO(get_logger(), "Bag split: '%s' -> '%s'",
         info.closed_file.c_str(), info.opened_file.c_str());
     };
-  // Losses reported here are storage-side or cache-overflow, distinct from the transport-side
-  // losses collected by the subscription message_lost_callback.
+  // Losses reported here are the writer's own: the cache was full because the disk could not
+  // keep up, or a storage write failed. They used to be added to the same counter as the
+  // transport-side losses collected by the subscription message_lost_callback, which put a slow
+  // SD card on the status line as "loss reported by transport" and sent the operator to debug
+  // the network. Kept apart so the number points at its own remedy.
   callbacks.messages_lost_callback =
     [this](const std::vector<rosbag2_cpp::bag_events::MessagesLostInfo> & infos) {
       std::lock_guard<std::mutex> lock(messages_lost_mutex_);
       for (const auto & info : infos) {
-        messages_lost_since_last_event_[info.topic_name] += info.num_messages_lost;
-        total_messages_lost_.fetch_add(info.num_messages_lost);
+        messages_lost_since_last_event_[info.topic_name].in_recorder += info.num_messages_lost;
+        messages_lost_in_recorder_.fetch_add(info.num_messages_lost);
       }
     };
   writer_->add_event_callbacks(callbacks);
@@ -1026,9 +1068,19 @@ bool DynamicRecorder::take_snapshot()
   }
 }
 
+uint64_t DynamicRecorder::messages_lost_in_transport() const
+{
+  return messages_lost_in_transport_.load();
+}
+
+uint64_t DynamicRecorder::messages_lost_in_recorder() const
+{
+  return messages_lost_in_recorder_.load();
+}
+
 uint64_t DynamicRecorder::total_messages_lost() const
 {
-  return total_messages_lost_.load();
+  return messages_lost_in_transport() + messages_lost_in_recorder();
 }
 
 uint64_t DynamicRecorder::total_messages_missed() const
@@ -1246,7 +1298,9 @@ DynamicRecorder::RecorderStatus DynamicRecorder::build_status() const
   status.subscribed_topics = subscribed_topics();
   status.active_profile = active_profile();
   status.messages_written = messages_written_.load(std::memory_order_relaxed);
-  status.messages_lost = total_messages_lost_.load();
+  status.messages_lost_in_transport = messages_lost_in_transport();
+  status.messages_lost_in_recorder = messages_lost_in_recorder();
+  status.messages_lost = status.messages_lost_in_transport + status.messages_lost_in_recorder;
   status.write_errors = write_errors_.load(std::memory_order_relaxed);
   status.messages_missed = messages_missed_.load(std::memory_order_relaxed);
   status.sequence_numbers_available =
@@ -1322,7 +1376,8 @@ bool DynamicRecorder::record(const std::string & uri)
     }
     messages_written_.store(0, std::memory_order_relaxed);
     messages_missed_.store(0, std::memory_order_relaxed);
-    total_messages_lost_.store(0);
+    messages_lost_in_transport_.store(0);
+    messages_lost_in_recorder_.store(0);
     bag_splits_.store(0, std::memory_order_relaxed);
 
     auto writer = std::make_unique<rosbag2_cpp::Writer>();
