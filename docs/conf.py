@@ -14,27 +14,25 @@
 
 """Sphinx configuration.
 
-Two choices here are worth explaining, because both were made to keep the build honest.
+Two choices are explained here because they keep the build self-contained.
 
-**ROS is mocked, not installed.** Building these docs needs no ROS at all: `rclpy` and the two
-interface packages are replaced by `autodoc_mock_imports` stand-ins. That is possible only because
-the library was written so that only one of its seven modules imports ROS at module scope, and
-`dynrec/__init__.py` resolves `Recorder` lazily -- the same property that lets 55 of its tests run
-without a graph. The alternative, installing ROS Rolling in CI to build a docs page, would turn a
-thirty-second job into a ten-minute one and make the docs unbuildable on a laptop.
+**ROS is mocked, not installed.** Building these docs needs no ROS: `rclpy` and the two interface
+packages are replaced by `autodoc_mock_imports` stand-ins. That works because only one of the
+library's seven modules imports ROS at module scope, and `dynrec/__init__.py` resolves `Recorder`
+lazily, the same property that lets 55 of its tests run without a graph. Installing ROS Rolling in
+CI to build a page would turn a thirty-second job into a ten-minute one.
 
 **Nothing is fetched at build time.** No intersphinx, no remote inventories, no CDN. A docs build
-that fails because someone else's server is down is a docs build that will eventually block a
-commit, and this project's whole install story is about working on a robot with no internet.
+that fails because someone else's server is down will eventually block a commit, and this project's
+install story is about working on a robot with no internet.
 """
 
 import os
 import sys
 from datetime import date
 
-# The library itself, so autodoc can read it straight from the working tree rather than from an
-# installed copy. Deliberately the source and not a build directory: the docs then describe the
-# code in front of you, which is the only version a contributor can act on.
+# The library itself, so autodoc reads it from the working tree rather than an installed copy. The
+# source, not a build directory, so the docs describe the code in front of you.
 sys.path.insert(0, os.path.abspath('../packages/dynrec'))
 
 project = 'rosbag2_dynamic_recorder'
@@ -48,21 +46,20 @@ extensions = [
     'sphinx.ext.autodoc',
     'sphinx.ext.viewcode',
     # Writes .nojekyll into the output. Without it GitHub Pages may run the build through Jekyll,
-    # which ignores directories beginning with an underscore -- and _static/ is where the theme's
-    # CSS and this project's logo live, so the site would come out unstyled and logo-less.
+    # which ignores directories beginning with an underscore; _static/ holds the theme CSS and the
+    # logo, so the site would come out unstyled.
     'sphinx.ext.githubpages',
 ]
 
-# Markdown throughout, because every existing document in this repository is Markdown. A
-# reStructuredText docs tree would have meant maintaining two dialects or rewriting all of them.
+# Markdown throughout: every other document in the repository is Markdown, and a reStructuredText
+# tree would mean maintaining two dialects.
 source_suffix = {'.md': 'markdown', '.rst': 'restructuredtext'}
 
 myst_enable_extensions = [
     'colon_fence',
     'deflist',
 ]
-# Give sub-headings anchors down to h3, so the longer pages can be deep-linked and their
-# in-page navigation works rather than listing only top-level sections.
+# Anchor sub-headings down to h3 so the longer pages can be deep-linked.
 myst_heading_anchors = 3
 
 exclude_patterns = ['_build', 'Thumbs.db', '.DS_Store', 'README.md']
@@ -94,9 +91,8 @@ html_theme = 'furo'
 html_title = 'rosbag2_dynamic_recorder'
 html_logo = '_static/dynrec_logo.png'
 
-# _static carries the logo and nothing else. Listed here only because it now has real content: an
-# empty _static/ is a directory git will not track, so it exists locally, vanishes in a fresh
-# clone, and fails the build under -W -- which is exactly how the first CI docs build failed.
+# _static holds the logo. Listed because an empty _static/ is not tracked by git: it exists
+# locally, vanishes in a fresh clone, and fails the build under -W.
 html_static_path = ['_static']
 
 REPO = 'https://github.com/juandanielsg/rosbag2_dynamic_recorder'

@@ -1,7 +1,7 @@
 # API reference
 
-Generated from the source. The [guide](index.md) is the place to start; this is the page to come
-back to for a signature.
+Generated from the source. The [guide](index.md) is the place to start; this is the page to come back
+to for a signature.
 
 ## The client
 
@@ -19,9 +19,9 @@ back to for a signature.
 
 ## Reading a bag back
 
-The rate every other tool reports is averaged over the whole bag, which describes a channel that
-stopped early as a slow sensor. These read the recorder's own events to measure each channel over
-the time it was actually being recorded.
+Most tools report a rate averaged over the whole bag, which describes a channel that stopped early as
+a slow sensor. These read the recorder's own events to measure each channel over the time it was
+actually being recorded.
 
 ```{eval-rst}
 .. automodule:: dynrec.bag
@@ -31,8 +31,8 @@ the time it was actually being recorded.
 
 ## Results
 
-What the calls hand back: plain data, not ROS messages. The rule these types exist to enforce is
-that a number the recorder cannot vouch for is `None`, never a convenient zero.
+What the calls hand back: plain data, not ROS messages. These types enforce the rule that a number
+the recorder cannot vouch for is `None`, never a zero.
 
 ```{eval-rst}
 .. automodule:: dynrec.results
@@ -51,8 +51,8 @@ that a number the recorder cannot vouch for is `None`, never a convenient zero.
 
 ## Discovery
 
-How a recorder is identified on the graph. Takes a graph listing as an argument rather than
-fetching one, which is what makes the rule testable without a ROS graph.
+How a recorder is identified on the graph. It takes a graph listing as an argument rather than
+fetching one, which makes the rule testable without a ROS graph.
 
 ```{eval-rst}
 .. automodule:: dynrec.discovery

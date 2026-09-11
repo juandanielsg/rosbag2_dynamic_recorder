@@ -5,7 +5,7 @@
   <version>0.1.0</version>
   <description>
     Interface definitions for runtime topic management on a rosbag2 recorder: services to
-    subscribe, unsubscribe and atomically replace the recorded topic set, plus a
+    subscribe, unsubscribe and replace the recorded topic set, plus a
     SubscriptionChangeEvent recorded into the bag so that a topic which stops mid-bag is
     distinguishable from lost data.
 

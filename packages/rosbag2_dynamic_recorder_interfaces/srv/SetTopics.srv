@@ -1,6 +1,8 @@
-# Atomically replace the recorded topic set with exactly this list.
+# Replace the recorded topic set with exactly this list.
 # Topics currently subscribed but absent here are unsubscribed; topics here but not currently
 # subscribed are subscribed; topics in both are left untouched and keep recording without a gap.
+# Not all-or-nothing: topics are removed before the new ones are added, removal is not rolled back
+# if an addition fails, and the request still succeeds with the failures in `unavailable_topics`.
 string[] topics
 
 # Optional list of topic types matching `topics` by index; must be the same length as `topics`
