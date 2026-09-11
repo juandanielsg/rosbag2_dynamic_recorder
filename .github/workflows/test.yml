@@ -56,7 +56,14 @@ jobs:
             python3-colcon-common-extensions \
             python3-pytest \
             nodejs
-          rosdep update
+          # rosdep update fetches a dozen YAML files from raw.githubusercontent.com and exits 1 if
+          # any one of them fails. A single reset connection there has taken down the whole job
+          # before a line of our code was built, so give it a few attempts before believing it.
+          for attempt in 1 2 3 4 5; do
+            rosdep update && break
+            [ "$attempt" -eq 5 ] && exit 1
+            sleep $((attempt * 10))
+          done
           rosdep install --from-paths packages --ignore-src -r -y
 
       # --base-paths because our packages live in packages/ rather than in a src/ directory --
@@ -73,6 +80,7 @@ jobs:
       # test` exits 0 when tests fail and only the separate test-result step notices, which is a
       # long way to travel to find out something is broken.
       - name: Test
+        id: test
         # A shared runner is slower at DDS discovery than a developer machine, and the CLI suite
         # spends a fresh process per invocation finding the recorder. Its default 0.5s budget is
         # right locally and too tight here -- measured, as four tests failing with "no
@@ -89,9 +97,11 @@ jobs:
             --return-code-on-test-failure
 
       # Runs even when the step above failed, because the summary is the thing worth reading: it
-      # names which tests failed rather than leaving that in the middle of the build log.
+      # names which tests failed rather than leaving that in the middle of the build log. Not
+      # when the tests never ran, though: then there is no build/ to summarise and this step only
+      # adds a second, misleading failure under the real one.
       - name: Test results
-        if: always()
+        if: always() && steps.test.outcome != 'skipped'
         run: |
           . /opt/ros/rolling/setup.sh
           colcon test-result --verbose
