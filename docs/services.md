@@ -97,7 +97,7 @@ whatever bag comes next.
 every change, and **latched**, so a client attaching mid-recording sees current state immediately
 rather than waiting for the next tick. A UI or a long-lived script should prefer the topic.
 
-Three fields need reading carefully:
+A few fields need reading carefully:
 
 `messages_missed`
 : Detected by watching for gaps in each publisher's sequence numbers. **The honest number** — it
@@ -113,6 +113,15 @@ Three fields need reading carefully:
 `bag_size_bytes`
 : Bytes **flushed to disk**, not bytes captured. The writer caches, so this reads 0 early in a
   perfectly healthy recording. Use `messages_written` to answer "is it recording?".
+
+`write_errors`
+: Messages that reached the recorder but could not be written, e.g. because the disk filled. Any
+  non-zero value means the bag is incomplete, and the recorder kept running anyway — deliberate,
+  since dying would lose the rest of the recording too.
+
+The remaining fields are literal: `recording`, `paused`, `snapshot_mode`, `elapsed_seconds`,
+`recording_started`, `subscribed_topics`, `bag_splits` (times the file has rolled over) and
+`messages_written` (which counts the recorder's own event messages too).
 
 `active_profile` is **derived from the live topic set on every publication, not remembered**. Tick
 one extra topic and it goes empty, because no profile is in effect any more. Land exactly on
@@ -188,6 +197,13 @@ A worked example using the TurtleBot 4 simulator's topics ships at
 | `messages_lost_report_period` | `5.0` | Seconds between `MessagesLostEvent`. `0` disables. |
 | `status_publish_period` | `1.0` | Seconds between `~/status` publications. |
 | `profile_names` | `[]` | Names of the declared profiles. |
+
+These are node parameters. The launch files forward only some of them — `uri`, `storage_id`,
+`serialization_format`, `topics`, `start_paused`, `snapshot_mode`, `max_cache_size`,
+`record_subscription_events` and `messages_lost_report_period` — so `record_pause_events`,
+`status_publish_period`, `profile_names` and the profiles themselves are set through `params_file`
+(or `-p name:=value` when running the node directly). The full argument list is in
+[Install](install.md#launch-arguments).
 
 ## Calling them by hand
 

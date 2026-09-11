@@ -226,8 +226,9 @@ that is not there yet is worth retrying, a call the recorder refused is not.
 
 ## Without ROS installed
 
-Four of the five modules import no ROS at all, and `import dynrec` resolves `Recorder` lazily, so
-the pure parts are importable on a machine with no rclpy:
+Only one of the package's seven modules — `client` — imports ROS at module scope; `bag` imports
+`rclpy` and `rosbag2_py` lazily inside `describe()`. `import dynrec` also resolves `Recorder`
+lazily, so the pure parts are importable on a machine with no rclpy:
 
 ```python
 from dynrec.schedule import parse_time     # works anywhere
@@ -235,5 +236,5 @@ from dynrec.results import Status          # works anywhere
 from dynrec import Recorder                # needs rclpy and the interfaces
 ```
 
-That is what lets 36 of the package's 58 tests run without a ROS graph, and what lets these docs
+That is what lets 55 of the package's 90 tests run without a ROS graph, and what lets these docs
 build without installing ROS.

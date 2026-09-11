@@ -18,10 +18,10 @@ Two choices here are worth explaining, because both were made to keep the build 
 
 **ROS is mocked, not installed.** Building these docs needs no ROS at all: `rclpy` and the two
 interface packages are replaced by `autodoc_mock_imports` stand-ins. That is possible only because
-the library was written so that four of its five modules import no ROS, and `dynrec/__init__.py`
-resolves `Recorder` lazily -- the same property that lets 36 of its tests run without a graph. The
-alternative, installing ROS Rolling in CI to build a docs page, would turn a thirty-second job into
-a ten-minute one and make the docs unbuildable on a laptop.
+the library was written so that only one of its seven modules imports ROS at module scope, and
+`dynrec/__init__.py` resolves `Recorder` lazily -- the same property that lets 55 of its tests run
+without a graph. The alternative, installing ROS Rolling in CI to build a docs page, would turn a
+thirty-second job into a ten-minute one and make the docs unbuildable on a laptop.
 
 **Nothing is fetched at build time.** No intersphinx, no remote inventories, no CDN. A docs build
 that fails because someone else's server is down is a docs build that will eventually block a

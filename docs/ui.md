@@ -9,7 +9,9 @@ ros2 launch rosbag2_dynamic_recorder_ui recorder_with_ui.launch.py uri:=/tmp/myb
 Then open **http://localhost:8088**.
 
 Tick topics to change what is being recorded. Profiles appear as buttons with the active one
-highlighted; there is a status line, a feed of recent changes, and a recording timeline.
+highlighted; there is a status line, a feed of recent changes, and a recording timeline. Pause,
+starting a new file, saving a snapshot and stopping are buttons too, and after a stop they give way
+to **Start recording**, which opens a fresh bag and restores the previous selection.
 
 ## The timeline
 
@@ -34,6 +36,25 @@ Two details that are deliberate:
 The topic picker has a filter, with a regex mode that hands the pattern to the recorder as a
 single `set_topics {regex: ...}` call rather than ticking boxes one at a time. Three test topics
 need no filter; a robot with a hundred does.
+
+## Endpoints
+
+The page is served by a small node that also exposes the two JSON endpoints it uses:
+`GET /api/state` returns everything the page renders in one response, and `POST /api/action` takes
+`{"action": "...", "topics": [...], "regex": "...", "exclude_regex": "...", "name": "..."}` for the
+same operations the buttons perform. They are not a versioned API, but they are enough to drive the
+UI from a script.
+
+## Parameters
+
+| Parameter | Default | Meaning |
+|---|---|---|
+| `recorder_node` | `/rosbag2_dynamic_recorder` | Recorder the UI drives. |
+| `port` | `8088` | Port to serve on. |
+| `bind` | `127.0.0.1` | Interface to listen on. Loopback by default; see the warning below. |
+
+The bundled launch file fixes `recorder_node` at `/rosbag2_dynamic_recorder`, so driving a
+differently named recorder means running `ui_node` yourself.
 
 ## What it is built from
 

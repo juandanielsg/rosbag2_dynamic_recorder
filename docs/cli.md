@@ -10,6 +10,7 @@ ros2 dynrec add /scan         # start recording /scan, leave everything else alo
 ros2 dynrec remove /scan      # stop recording it
 ros2 dynrec set /tf /odom     # record exactly these
 ros2 dynrec profile navigation
+ros2 dynrec profiles          # list configured profiles, active one marked
 ros2 dynrec pause | resume | toggle | split | snapshot | stop | record
 ```
 
@@ -21,6 +22,9 @@ namespace is found, and a node that merely borrows the name is not.
 
 Pass `--node` when several are running. With more than one it refuses to guess and lists them,
 because guessing could stop the wrong recording.
+
+Every verb also takes `--timeout N` (seconds to wait for a service and its reply, default 10) and
+`--spin-time N` (seconds to spin for graph discovery before looking, default 1).
 
 ## Exit codes
 
@@ -57,6 +61,13 @@ ros2 dynrec add /scan:sensor_msgs/msg/LaserScan
 
 That is how you record a topic whose publisher has not started yet. Without it the type is
 discovered from the graph, which needs the topic to be there already.
+
+## Profiles
+
+`ros2 dynrec profiles` lists the configured profiles with the active one marked `*` and each
+profile's topics beneath it, or says none are configured. `--names` prints just the names, one per
+line, for scripting. `ros2 dynrec profile <name>` applies one — see
+[Profiles](services.md#profiles) for how they are declared.
 
 ## Scheduling
 
@@ -107,7 +118,8 @@ not paused, which the recorder's events make knowable.
 It **exits 2** when the bag holds a hole that nothing explains: a gap shared by every live channel
 with no pause event behind it, which is what a crash, a stall, or a recording made with
 `record_pause_events:=false` all look like. A sparse channel on its own is normal and is not an
-error. `--json` gives the same report as data, with unknowable values as `null`.
+error. `--json` gives the same report as data, with unknowable values as `null`, and
+`--storage-id` overrides the storage plugin when it cannot be detected from the bag.
 
 ## Machine-readable status
 

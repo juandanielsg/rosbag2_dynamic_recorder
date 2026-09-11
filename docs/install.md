@@ -26,6 +26,39 @@ ros2 launch rosbag2_dynamic_recorder dynamic_recorder.launch.py \
   uri:=/tmp/mybag topics:="['/scan','/odom']"
 ```
 
+## Launch arguments
+
+`dynamic_recorder.launch.py` forwards these to the node:
+
+| Argument | Default | Meaning |
+|---|---|---|
+| `uri` | `dynamic_bag` | Output bag path. |
+| `storage_id` | `mcap` | Storage plugin. |
+| `serialization_format` | `cdr` | Message serialization format. |
+| `topics` | `[]` | Topics to record at startup, as a YAML list. May be empty. |
+| `start_paused` | `false` | Start with recording paused. |
+| `snapshot_mode` | `false` | Buffer in memory and write only on `~/snapshot`. |
+| `max_cache_size` | `104857600` | Writer cache in bytes. `snapshot_mode` requires it to be > 0. |
+| `record_subscription_events` | `true` | Write subscription changes into the bag. |
+| `messages_lost_report_period` | `5.0` | Seconds between `MessagesLostEvent`. `0` disables. |
+| `params_file` | *(empty)* | Optional YAML of extra parameters, e.g. profiles. |
+
+The other node parameters — `record_pause_events`, `status_publish_period`, `profile_names` and the
+profiles themselves — are **not** launch arguments. Set them through `params_file`, or with
+`-p name:=value` when running the node directly:
+
+```bash
+ros2 run rosbag2_dynamic_recorder dynamic_recorder --ros-args \
+  -p uri:=/tmp/mybag -p record_pause_events:=false
+```
+
+`recorder_with_ui.launch.py` takes the same list, plus:
+
+| Argument | Default | Meaning |
+|---|---|---|
+| `port` | `8088` | Port for the browser UI. |
+| `bind` | `127.0.0.1` | Address the UI listens on. Loopback by default because the UI has no authentication; see [the UI page](ui.md). |
+
 ## Client-only install
 
 A machine that only *drives* a recorder running somewhere else — a fleet console, a laptop on the
