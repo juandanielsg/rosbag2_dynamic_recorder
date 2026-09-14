@@ -119,7 +119,9 @@ than from `rosbag2_interfaces.srv` and they match the recorder built on the same
 `ros2 service type <service>` shows what a running recorder offers.
 
 There are no per-distro branches. A distro-specific difference is a probe and an `#if`, kept
-next to the code it guards, and a release is a tag on `main` that CI has passed on every distro.
+next to the code it guards, and a release is a tag on `main`. Pushing a tag runs the full matrix
+on that commit and publishes a GitHub Release only if it passes, so every release page is a
+commit proven on every distro.
 
 Kilted reaches end of life in November 2026. Humble has not been tried; it is older than Jazzy and
 would need its own look.

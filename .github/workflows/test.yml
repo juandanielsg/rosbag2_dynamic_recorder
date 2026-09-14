@@ -21,6 +21,9 @@ on:
     branches: [main]
   pull_request:
   workflow_dispatch:
+  # release.yml runs this same matrix on a tag before it publishes a release, so a tag is a
+  # commit this job has passed by construction rather than by convention.
+  workflow_call:
 
 permissions:
   contents: read

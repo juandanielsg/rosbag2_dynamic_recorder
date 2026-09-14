@@ -1,0 +1,53 @@
+# Turns a version tag into a GitHub Release, after proving it.
+#
+# A tag is the project's unit of "known good on every distro": docs tell users to clone
+# `--branch vX.Y.Z`. That claim is only worth making if something checks it, so this workflow
+# runs the full test matrix on the tagged commit first, refuses a tag whose version does not
+# match the package manifests, and creates the release only when both hold. The release notes
+# are the annotated tag's message, which is where the maintainer already writes them.
+#
+# To release: bump <version> in every packages/*/package.xml, push, then
+#   git tag -a vX.Y.Z -m "..." && git push origin vX.Y.Z
+
+name: release
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    uses: ./.github/workflows/test.yml
+
+  release:
+    needs: test
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      # Every package carries the same version, and the tag has to be that version with a `v`
+      # in front. A mismatch means someone tagged before bumping, and a release page that
+      # disagrees with the manifests it points at is worse than no release page.
+      - name: Check the tag against the package versions
+        run: |
+          set -e
+          tag="${GITHUB_REF_NAME#v}"
+          status=0
+          for manifest in packages/*/package.xml; do
+            version=$(sed -n 's:.*<version>\(.*\)</version>.*:\1:p' "$manifest")
+            if [ "$version" != "$tag" ]; then
+              echo "::error file=$manifest::version $version does not match tag v$tag"
+              status=1
+            fi
+          done
+          exit $status
+
+      - name: Create the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "$GITHUB_REF_NAME" --verify-tag --title "$GITHUB_REF_NAME" --notes-from-tag
