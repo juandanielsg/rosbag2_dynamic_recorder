@@ -1,0 +1,42 @@
+# Development container. From the repository root:
+#   docker compose -f .devcontainer/docker-compose.yml up -d
+#   docker compose -f .devcontainer/docker-compose.yml exec rosbag2-dev bash -l
+# then inside: colcon build --symlink-install && colcon test
+#
+# ROS_DISTRO=jazzy|kilted|rolling selects the image; the default matches CI's newest target.
+# Local-only additions (the optional upstream rosbag2 checkout, demo tooling) belong in a
+# docker-compose.override.yml next to this file, which compose merges in and git ignores.
+
+# Pinned so the project name does not become "devcontainer" from the directory this file is in.
+name: rosbag2-contrib
+
+services:
+  rosbag2-dev:
+    build:
+      context: ..
+      dockerfile: .devcontainer/Dockerfile
+      args:
+        ROS_DISTRO: ${ROS_DISTRO:-rolling}
+    # NOTE: no USER_UID/USER_GID override here -- the base ROS image owns UID/GID 1000, so we let
+    # the Dockerfile default (1001) apply.
+    image: rosbag2-contrib:${ROS_DISTRO:-rolling}
+    container_name: rosbag2-contrib
+    # Keep running so we can exec in interactively
+    stdin_open: true
+    tty: true
+    # Published ports rather than network_mode:host. On Docker Desktop, host mode means the WSL2
+    # VM's network, which the host OS cannot reach -- so the browser UI would be unreachable from
+    # the machine you are sitting at. Host mode buys nothing here anyway: the nodes all run inside
+    # this container, so DDS never crosses a boundary.
+    ports:
+      - "8088:8088"   # browser UI; launch it with bind:=0.0.0.0, see docs/ui.md
+    environment:
+      - ROS_DOMAIN_ID=${ROS_DOMAIN_ID:-0}
+      - RMW_IMPLEMENTATION=${RMW_IMPLEMENTATION:-rmw_fastrtps_cpp}
+    volumes:
+      # Our packages, live. Under src/ so a plain `colcon build` in the workspace finds them.
+      - ../packages:${WORKSPACE:-/home/rosbag/ros2_ws}/src/packages:rw
+      - ../build:${WORKSPACE:-/home/rosbag/ros2_ws}/build
+      - ../install:${WORKSPACE:-/home/rosbag/ros2_ws}/install
+      - ../log:${WORKSPACE:-/home/rosbag/ros2_ws}/log
+    working_dir: ${WORKSPACE:-/home/rosbag/ros2_ws}

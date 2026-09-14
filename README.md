@@ -27,10 +27,11 @@ a standard rosbag2 bag and the ecosystem keeps working. Only the control plane i
 
 ## Install
 
-You need ROS 2 Rolling. Everything else comes from apt; no need to build rosbag2 from source.
+You need ROS 2 Jazzy, Kilted or Rolling. Everything else comes from apt; no need to build rosbag2
+from source.
 
 ```bash
-sudo apt install ros-rolling-rosbag2 ros-rolling-rosbag2-storage-mcap
+sudo apt install ros-$ROS_DISTRO-rosbag2 ros-$ROS_DISTRO-rosbag2-storage-mcap
 
 mkdir -p ~/ws/src && cd ~/ws/src
 git clone https://github.com/juandanielsg/rosbag2_dynamic_recorder.git
@@ -99,6 +100,10 @@ The project's services return `return_code` 0 on success and 1 on error or when 
 actioned. The reused `rosbag2_interfaces` services keep their own return codes; `snapshot` returns a
 bool.
 
+On Jazzy and Kilted, `record`, `resume`, `split_bagfile` and `stop` are offered under field-identical
+copies in `rosbag2_dynamic_recorder_interfaces`, because the stock definitions there predate
+scheduling; see [ROS 2 compatibility](#ros-2-compatibility).
+
 `resume`, `split_bagfile` and `record` accept a future timestamp. Node time (`mode: 0`) runs on a
 timer and fires even if the robot has gone quiet; it is the only mode `record` supports. Publish
 time (`1`) and receive time (`2`) compare against arriving messages, on any recorded topic or
@@ -150,6 +155,11 @@ you got there.
 
 Writing the first two into the bag is what makes a gap legible; without them it is
 indistinguishable from a dropout, a crash or a network fault.
+
+`MessagesLostEvent` is the stock `rosbag2_interfaces` type on Rolling and a field-identical copy from
+`rosbag2_dynamic_recorder_interfaces` on Jazzy and Kilted, whose rosbag2 has none. Its
+`messages_lost_in_recorder` is only ever non-zero on Rolling; older writers do not report their own
+losses, so there the count is unknown rather than zero.
 
 - `SubscriptionChangeEvent` marks where one topic stops while others carry on. Disable with
   `record_subscription_events:=false`.
@@ -346,22 +356,33 @@ the full launch-argument list is in [docs/install.md](docs/install.md#launch-arg
 
 ## ROS 2 compatibility
 
-Developed against Rolling, and at present Rolling only. CI builds all five packages and runs the
-full suite against `ros:rolling-ros-base` on pushes to `main` and on PRs.
+Jazzy, Kilted and Rolling, from one branch. CI builds all five packages and runs the full suite in
+`ros:jazzy-ros-base`, `ros:kilted-ros-base` and `ros:rolling-ros-base` on pushes to `main` and on
+PRs; a distro is listed as supported because that job is green on it.
 
-The table was measured in September 2026 with `colcon build` in each image; upstream support may
-have moved since.
-
-| Distro | Status | What happens |
+| Distro | Status | Differences |
 |---|---|---|
-| **Rolling** | **Supported** | Builds and passes the suite in CI |
-| **Kilted** | **Does not build** | `ament_cmake_ros_core` is present, but not the `ament_cmake_ros_core::ament_ros_defaults` target Rolling exports |
-| **Jazzy** (LTS) | **Does not build** | `ament_cmake_ros_core` is not present, so `find_package` fails |
-| **Humble** (LTS) | **Not tested** | Older than Jazzy, which already fails on a package Humble does not ship either |
+| **Rolling** | Supported | None; this is what the project is written against (rosbag2 0.34). |
+| **Kilted** | Supported | Below. Kilted reaches end of life in November 2026. |
+| **Jazzy** (LTS) | Supported | Below. |
+| **Humble** (LTS) | Not tested | Older than Jazzy; would need its own look. |
 
-Kilted and Jazzy failed during CMake configuration, before this project compiled. The CMake links
-exported namespaced targets directly instead of using `ament_target_dependencies()`; how large a
-backport would be is unknown.
+The differences on Jazzy and Kilted come from what their rosbag2 (0.26 and 0.32) does not have. The
+recorder's CMake probes the installed headers rather than trusting a version number, and
+`dynrec.services` makes the same decisions for clients:
+
+- **Four services are offered under copies.** `Record`, `Resume` and `SplitBagfile` gained their
+  scheduling fields and `Stop` its return code in rosbag2 0.34; Kilted has no `Record` at all. Where
+  the installed stock definition is field-identical to 0.34 the recorder offers the stock type, so a
+  client written for `ros2 bag record` drives it unchanged; elsewhere it offers the copy from
+  `rosbag2_dynamic_recorder_interfaces`, with the same fields and the same behaviour, so scheduling
+  works everywhere. `ros2 service type ~/resume` tells you which. `pause`, `toggle_paused`,
+  `is_paused` and `snapshot` are identical on every distro and are always stock.
+- **`MessagesLostEvent` is a copy, and `messages_lost_in_recorder` stays 0.** Only Rolling's writer
+  reports its own losses. Transport losses are counted on every distro.
+- **`max_cache_duration` is refused.** Older `StorageOptions` have no time bound on the writer cache.
+  The parameter still exists so a params file loads everywhere, but a non-zero value fails at
+  startup rather than being dropped silently; use `max_cache_size`.
 
 ## Status
 
@@ -379,6 +400,7 @@ packages/
   dynrec/                                the Python library, for scripts
   rosbag2_dynamic_recorder_ui/           the browser UI
 docs/                                    Sphinx documentation sources
+.devcontainer/                           dev container, the same environment as CI
 src/                                     optional upstream rosbag2 checkout (untracked)
 ```
 
@@ -409,26 +431,28 @@ silently collects nothing.
 
 ## Development
 
-A Docker dev container is provided for working on the project and for running the recorder against
-a simulator without installing ROS on the host.
+A dev container is provided for working on the project without installing ROS on the host. It is
+the same environment as CI, one `ros:<distro>-ros-base` image plus the dependencies from our own
+manifests, and lives in `.devcontainer/` so that VS Code offers to reopen the repository in it.
+From the repository root:
 
 ```bash
-docker compose build
-docker compose up -d
-docker compose exec rosbag2-dev bash -l
+docker compose --project-directory .devcontainer build      # ROS_DISTRO=jazzy|kilted|rolling
+docker compose --project-directory .devcontainer up -d
+docker compose --project-directory .devcontainer exec rosbag2-dev bash -l
 ```
 
 Inside the container:
 
 ```bash
-colcon build --packages-select \
-  rosbag2_dynamic_recorder_interfaces rosbag2_dynamic_recorder --symlink-install
+colcon build --symlink-install
 source install/setup.bash
-colcon test --packages-select rosbag2_dynamic_recorder && colcon test-result --verbose
+colcon test && colcon test-result --verbose
 ```
 
 The upstream rosbag2 sources are optional, useful for reading the code this builds against but not
-required to build:
+required to build. Anything local of that kind goes in `.devcontainer/docker-compose.override.yml`,
+which compose merges in and git ignores:
 
 ```bash
 git clone https://github.com/ros2/rosbag2.git src && git -C src checkout ae42fb9
@@ -439,10 +463,9 @@ Notes:
 - Port 8088 is published, so launch the UI with `bind:=0.0.0.0`; the default loopback bind is
   inside the container, and Docker would have nothing to forward to. The container does not use
   `network_mode: host`, which on Docker Desktop is the WSL2 VM's network that the host cannot reach.
-- Packages live in `packages/`, mounted separately so the optional upstream checkout in `src/`
-  stays pristine.
-- If you add a package with new dependencies, run
-  `rosdep install -r -y --from-paths src --ignore-src` in the container.
+- Packages live in `packages/`, mounted at `src/packages` so a plain `colcon build` finds them.
+- Dependencies are installed into the image from the manifests. If you add a `<depend>`, rebuild
+  the image, or run `rosdep install -r -y --from-paths src --ignore-src` in the container.
 
 ## License
 

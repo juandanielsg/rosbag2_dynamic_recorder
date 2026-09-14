@@ -1,10 +1,12 @@
-# Builds every package and runs the full test suite on ROS 2 Rolling.
+# Builds every package and runs the full test suite on every supported ROS 2 distro.
 #
 # This is the workflow that turns the README's claims into evidence. The numbers it quotes -- the
 # worst-case gap on an untouched topic, unknown-never-zero at every boundary -- are only worth
-# stating in public because something re-checks them on every push.
+# stating in public because something re-checks them on every push. The compatibility table is
+# the same: a distro is listed as supported because this job is green on it, not because it was
+# once tried.
 #
-# It runs in the official `ros:rolling-ros-base` container rather than installing ROS onto the
+# It runs in the official `ros:<distro>-ros-base` containers rather than installing ROS onto the
 # runner, because a ROS install from apt on a bare runner is most of the job's runtime and buys
 # nothing: the image is the same packages, already unpacked.
 #
@@ -29,8 +31,15 @@ concurrency:
 
 jobs:
   test:
+    # fail-fast off: a Rolling breakage from an upstream API move is exactly the case where the
+    # Jazzy and Kilted results are the interesting ones, and cancelling them hides that.
+    strategy:
+      fail-fast: false
+      matrix:
+        distro: [jazzy, kilted, rolling]
+    name: test (${{ matrix.distro }})
     runs-on: ubuntu-latest
-    container: ros:rolling-ros-base
+    container: ros:${{ matrix.distro }}-ros-base
     # The integration tests start real recorder processes and wait on real message traffic, so
     # this is slower than a unit-test job and the timeout has to leave room for a loaded runner.
     timeout-minutes: 30
@@ -73,7 +82,7 @@ jobs:
       - name: Build
         run: |
           set -ex
-          . /opt/ros/rolling/setup.sh
+          . /opt/ros/${{ matrix.distro }}/setup.sh
           colcon build --base-paths packages --event-handlers console_direct+
 
       # --return-code-on-test-failure makes this step fail on a failing test. Without it `colcon
@@ -90,7 +99,7 @@ jobs:
           DYNREC_TEST_SPIN_TIME: '3'
         run: |
           set -ex
-          . /opt/ros/rolling/setup.sh
+          . /opt/ros/${{ matrix.distro }}/setup.sh
           . install/setup.sh
           colcon test --base-paths packages \
             --event-handlers console_direct+ \
@@ -103,7 +112,7 @@ jobs:
       - name: Test results
         if: always() && steps.test.outcome != 'skipped'
         run: |
-          . /opt/ros/rolling/setup.sh
+          . /opt/ros/${{ matrix.distro }}/setup.sh
           colcon test-result --verbose
 
       # The pytest XML and the per-test logs, kept so a failure that does not reproduce locally
@@ -111,7 +120,7 @@ jobs:
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: test-logs
+          name: test-logs-${{ matrix.distro }}
           path: |
             log/latest_test/
             build/**/pytest.xml

@@ -39,3 +39,6 @@ docs/_build/
 # Untracked in the same commit that removed them from the published docs tree.
 /notes/
 /spike/
+
+# Local additions to the dev container (upstream checkout, demo mounts); see the file's header.
+/.devcontainer/docker-compose.override.yml

@@ -10,6 +10,8 @@ rosidl_generate_interfaces(${PROJECT_NAME}
   "msg/PauseEvent.msg"
   "msg/RecorderStatus.msg"
   "msg/Profile.msg"
+  "msg/MessagesLostEventTopicStat.msg"
+  "msg/MessagesLostEvent.msg"
   "srv/SubscribeTopics.srv"
   "srv/UnsubscribeTopics.srv"
   "srv/SetTopics.srv"
@@ -17,6 +19,10 @@ rosidl_generate_interfaces(${PROJECT_NAME}
   "srv/GetSubscribedTopics.srv"
   "srv/SetProfile.srv"
   "srv/GetProfiles.srv"
+  "srv/Record.srv"
+  "srv/Resume.srv"
+  "srv/SplitBagfile.srv"
+  "srv/Stop.srv"
   DEPENDENCIES builtin_interfaces
 )
 

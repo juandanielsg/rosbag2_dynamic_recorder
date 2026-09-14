@@ -14,10 +14,9 @@
 
 import sys
 
+from dynrec.services import Snapshot
 from rosbag2_dynamic_recorder_cli.api import add_recorder_arguments, with_recorder
 from rosbag2_dynamic_recorder_cli.verb import VerbExtension
-
-from rosbag2_interfaces.srv import Snapshot
 
 
 class SnapshotVerb(VerbExtension):

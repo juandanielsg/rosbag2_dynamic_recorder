@@ -54,15 +54,27 @@ from rclpy.serialization import deserialize_message
 from rosbag2_py import ConverterOptions, SequentialReader, StorageOptions
 
 from rosbag2_dynamic_recorder_interfaces.msg import PauseEvent, SubscriptionChangeEvent
-from rosbag2_interfaces.srv import (
-    Pause,
-    Record,
-    Resume,
-    Snapshot,
-    SplitBagfile,
-    Stop,
-    TogglePaused,
-)
+# The recorder offers Record, Resume, SplitBagfile and Stop under the stock rosbag2_interfaces
+# type where the installed definition matches the rosbag2 0.34 shape and under the copy in
+# rosbag2_dynamic_recorder_interfaces where it does not (Jazzy, Kilted). dynrec.services encodes
+# that rule for clients; this suite cannot import dynrec without a dependency cycle, so it applies
+# the same rule here.
+from rosbag2_interfaces.srv import Pause, Snapshot, TogglePaused
+import rosbag2_interfaces.srv as _stock
+import rosbag2_dynamic_recorder_interfaces.srv as _own
+
+
+def _service_type(name, part, field):
+    stock = getattr(_stock, name, None)
+    if stock is not None and hasattr(getattr(stock, part), field):
+        return stock
+    return getattr(_own, name)
+
+
+Record = _service_type("Record", "Request", "start_time")
+Resume = _service_type("Resume", "Request", "resume_mode")
+SplitBagfile = _service_type("SplitBagfile", "Request", "split_mode")
+Stop = _service_type("Stop", "Response", "return_code")
 
 EVENT_TYPE = "rosbag2_dynamic_recorder_interfaces/msg/SubscriptionChangeEvent"
 SUBSCRIBED, UNSUBSCRIBED = 0, 1
@@ -493,6 +505,12 @@ def test_storage_options_reach_the_writer():
         cleanup()
 
 
+# A time bound on the writer cache reached rosbag2 on Rolling only. rosbag2_py mirrors the C++
+# StorageOptions field for field, so this is the same probe the recorder's CMake runs.
+WRITER_HAS_CACHE_DURATION = hasattr(StorageOptions(uri=""), "max_cache_duration")
+
+
+@pytest.mark.skipif(not WRITER_HAS_CACHE_DURATION, reason="this rosbag2 has no max_cache_duration")
 def test_snapshot_mode_accepts_a_duration_bound_alone():
     """The writer treats a duration-limited cache as a valid buffer, so snapshot_mode must not
     insist on max_cache_size when max_cache_duration is set."""
@@ -502,6 +520,14 @@ def test_snapshot_mode_accepts_a_duration_bound_alone():
         assert harness.status().snapshot_mode is True
     finally:
         cleanup()
+
+
+@pytest.mark.skipif(WRITER_HAS_CACHE_DURATION, reason="this rosbag2 has max_cache_duration")
+def test_cache_duration_is_refused_where_the_writer_has_none():
+    """On Jazzy and Kilted the parameter exists so a params file loads everywhere, but a non-zero
+    value would be silently dropped. Refusing at startup is the honest alternative."""
+    with pytest.raises(AssertionError, match="exited early"):
+        _start_recorder(("-p", "max_cache_duration:=2"))
 
 
 def test_unknown_storage_preset_is_refused_at_startup():

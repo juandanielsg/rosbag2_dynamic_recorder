@@ -31,16 +31,42 @@
 #include "rosbag2_cpp/writer.hpp"
 #include "rosbag2_storage/storage_options.hpp"
 
-#include "rosbag2_interfaces/msg/messages_lost_event.hpp"
 #include "rosbag2_interfaces/msg/write_split_event.hpp"
 #include "rosbag2_interfaces/srv/is_paused.hpp"
 #include "rosbag2_interfaces/srv/pause.hpp"
-#include "rosbag2_interfaces/srv/record.hpp"
-#include "rosbag2_interfaces/srv/resume.hpp"
 #include "rosbag2_interfaces/srv/snapshot.hpp"
-#include "rosbag2_interfaces/srv/split_bagfile.hpp"
-#include "rosbag2_interfaces/srv/stop.hpp"
 #include "rosbag2_interfaces/srv/toggle_paused.hpp"
+// The ROSBAG2_DYNAMIC_RECORDER_HAS_UPSTREAM_* macros are set by CMake from the installed
+// rosbag2_interfaces headers. Each stock type is used where its definition is field-identical to
+// the one this project was written against (rosbag2 0.34, Rolling), so a client written for
+// stock rosbag2 can drive the recorder; elsewhere -- Jazzy and Kilted, whose Record, Resume and
+// SplitBagfile predate scheduling, whose Stop has no return code and which have no
+// MessagesLostEvent -- the field-identical copy in rosbag2_dynamic_recorder_interfaces stands in.
+#if ROSBAG2_DYNAMIC_RECORDER_HAS_UPSTREAM_MESSAGES_LOST_EVENT
+#include "rosbag2_interfaces/msg/messages_lost_event.hpp"
+#else
+#include "rosbag2_dynamic_recorder_interfaces/msg/messages_lost_event.hpp"
+#endif
+#if ROSBAG2_DYNAMIC_RECORDER_HAS_UPSTREAM_RECORD
+#include "rosbag2_interfaces/srv/record.hpp"
+#else
+#include "rosbag2_dynamic_recorder_interfaces/srv/record.hpp"
+#endif
+#if ROSBAG2_DYNAMIC_RECORDER_HAS_UPSTREAM_RESUME
+#include "rosbag2_interfaces/srv/resume.hpp"
+#else
+#include "rosbag2_dynamic_recorder_interfaces/srv/resume.hpp"
+#endif
+#if ROSBAG2_DYNAMIC_RECORDER_HAS_UPSTREAM_SPLIT_BAGFILE
+#include "rosbag2_interfaces/srv/split_bagfile.hpp"
+#else
+#include "rosbag2_dynamic_recorder_interfaces/srv/split_bagfile.hpp"
+#endif
+#if ROSBAG2_DYNAMIC_RECORDER_HAS_UPSTREAM_STOP
+#include "rosbag2_interfaces/srv/stop.hpp"
+#else
+#include "rosbag2_dynamic_recorder_interfaces/srv/stop.hpp"
+#endif
 #include "rosbag2_dynamic_recorder_interfaces/msg/pause_event.hpp"
 #include "rosbag2_dynamic_recorder_interfaces/msg/profile.hpp"
 #include "rosbag2_dynamic_recorder_interfaces/msg/recorder_status.hpp"
@@ -141,19 +167,40 @@ private:
   using GetSubscribedTopics =
     rosbag2_dynamic_recorder_interfaces::srv::GetSubscribedTopics;
   using Pause = rosbag2_interfaces::srv::Pause;
-  using Record = rosbag2_interfaces::srv::Record;
-  using Resume = rosbag2_interfaces::srv::Resume;
   using TogglePaused = rosbag2_interfaces::srv::TogglePaused;
   using IsPaused = rosbag2_interfaces::srv::IsPaused;
-  using SplitBagfile = rosbag2_interfaces::srv::SplitBagfile;
   using Snapshot = rosbag2_interfaces::srv::Snapshot;
+  // Stock or copy, decided at the includes above; the code below is written once.
+#if ROSBAG2_DYNAMIC_RECORDER_HAS_UPSTREAM_RECORD
+  using Record = rosbag2_interfaces::srv::Record;
+#else
+  using Record = rosbag2_dynamic_recorder_interfaces::srv::Record;
+#endif
+#if ROSBAG2_DYNAMIC_RECORDER_HAS_UPSTREAM_RESUME
+  using Resume = rosbag2_interfaces::srv::Resume;
+#else
+  using Resume = rosbag2_dynamic_recorder_interfaces::srv::Resume;
+#endif
+#if ROSBAG2_DYNAMIC_RECORDER_HAS_UPSTREAM_SPLIT_BAGFILE
+  using SplitBagfile = rosbag2_interfaces::srv::SplitBagfile;
+#else
+  using SplitBagfile = rosbag2_dynamic_recorder_interfaces::srv::SplitBagfile;
+#endif
+#if ROSBAG2_DYNAMIC_RECORDER_HAS_UPSTREAM_STOP
   using Stop = rosbag2_interfaces::srv::Stop;
+#else
+  using Stop = rosbag2_dynamic_recorder_interfaces::srv::Stop;
+#endif
   using SubscriptionChangeEvent =
     rosbag2_dynamic_recorder_interfaces::msg::SubscriptionChangeEvent;
   using PauseEvent = rosbag2_dynamic_recorder_interfaces::msg::PauseEvent;
   using RecorderStatus = rosbag2_dynamic_recorder_interfaces::msg::RecorderStatus;
   using WriteSplitEvent = rosbag2_interfaces::msg::WriteSplitEvent;
+#if ROSBAG2_DYNAMIC_RECORDER_HAS_UPSTREAM_MESSAGES_LOST_EVENT
   using MessagesLostEvent = rosbag2_interfaces::msg::MessagesLostEvent;
+#else
+  using MessagesLostEvent = rosbag2_dynamic_recorder_interfaces::msg::MessagesLostEvent;
+#endif
 
   /// Resolve a topic's type from an already-fetched view of the graph.
   ///
@@ -336,7 +383,18 @@ private:
   /// resolving a message definition costs ~300-470ms, so skipping it matters.
   std::unordered_map<std::string, std::string> known_channels_;
 
-  std::unordered_map<std::string, rclcpp::GenericSubscription::SharedPtr> subscriptions_;
+  /// A subscription and the switch that silences it. Dropping the handle is not enough: a
+  /// callback already queued in the executor still fires. rclcpp 33 (Rolling) has
+  /// GenericSubscription::disable_callbacks() for exactly that; on Jazzy and Kilted the callback
+  /// checks this flag first, which gives the same guarantee on every distro.
+  struct Subscription
+  {
+    rclcpp::GenericSubscription::SharedPtr handle;
+    std::shared_ptr<std::atomic<bool>> enabled;
+  };
+  static void silence(Subscription & subscription);
+
+  std::unordered_map<std::string, Subscription> subscriptions_;
   mutable std::mutex subscriptions_mutex_;
 
   /// Services run here, separate from the default group used by subscription callbacks, so that

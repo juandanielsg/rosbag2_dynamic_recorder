@@ -59,6 +59,15 @@ type from the graph.
 These use the stock `rosbag2_interfaces` definitions, so a client written against standard rosbag2
 drives this node unchanged.
 
+That holds fully on Rolling, which is the rosbag2 (0.34) this project is written against. Jazzy and
+Kilted ship older definitions: `Record`, `Resume` and `SplitBagfile` without the scheduling fields
+(Kilted has no `Record` at all) and `Stop` without a return code. There the recorder offers those
+four under field-identical copies in `rosbag2_dynamic_recorder_interfaces`, with the same
+behaviour, so scheduling works on every distro; `ros2 service type ~/resume` tells you which is in
+use. `pause`, `toggle_paused`, `is_paused` and `snapshot` are the same on every distro and always
+stock. Python clients should take these types from `dynrec.services`, which resolves them the same
+way the recorder does; see [Install](install.md#ros-2-distributions).
+
 | Service | Type | Purpose |
 |---|---|---|
 | `~/pause` `~/resume` `~/toggle_paused` `~/is_paused` | `Pause`, `Resume`, … | Stop writing without tearing down subscriptions. |
@@ -114,7 +123,8 @@ A few fields need reading carefully:
   while the disk could not keep up or because a storage write failed. Known with certainty, and the
   remedy is local: `max_cache_size` or `max_cache_duration`, a lighter `storage_preset_profile`,
   fewer or lighter topics, or faster storage. The name matches the same field in rosbag2's own
-  `MessagesLostEvent`, which `~/events/messages_lost` also now fills correctly.
+  `MessagesLostEvent`, which `~/events/messages_lost` also now fills correctly. Only Rolling's
+  writer reports these losses; on Jazzy and Kilted this reads 0 and means unknown, not zero.
 
 `messages_lost`
 : The two above summed, for anything that only wants a total. Inherits the transport caveat.
@@ -143,7 +153,7 @@ profile's set and it reports that one, whatever command got you there.
 | `~/events/subscription_change` | `SubscriptionChangeEvent` | also written into the bag |
 | `~/events/pause` | `PauseEvent` | also written into the bag |
 | `~/events/write_split` | `WriteSplitEvent` | |
-| `~/events/messages_lost` | `MessagesLostEvent` | |
+| `~/events/messages_lost` | `MessagesLostEvent` | stock on Rolling, a field-identical copy on Jazzy and Kilted |
 
 Writing the first two into the bag is what makes a gap legible: a gap mid-bag is otherwise
 indistinguishable from a dropout, a crash or a network fault. The event records what changed, when and why, in-stream and
@@ -199,7 +209,7 @@ A worked example using the TurtleBot 4 simulator's topics ships at
 | `start_paused` | `false` | Start with recording paused. |
 | `snapshot_mode` | `false` | Buffer in memory, write only on `~/snapshot`. |
 | `max_cache_size` | `104857600` | Writer cache in bytes. `snapshot_mode` needs this or `max_cache_duration` > 0. |
-| `max_cache_duration` | `0` | Writer cache bound in seconds; `0` for none. Combines with `max_cache_size`. |
+| `max_cache_duration` | `0` | Writer cache bound in seconds; `0` for none. Combines with `max_cache_size`. Rolling only: refused at startup elsewhere. |
 | `max_bagfile_size` | `0` | Split when a file reaches this many bytes; `0` never. |
 | `max_bagfile_duration` | `0` | Split every this many seconds; `0` never. |
 | `storage_preset_profile` | *(empty)* | Storage plugin preset. mcap: `none`, `fastwrite`, `zstd_fast`, `zstd_small`. |

@@ -1,0 +1,21 @@
+# Field-identical to rosbag2_interfaces/srv/Record as of rosbag2 0.34 (Rolling), deliberately.
+#
+# The recorder offers ~/record on every distro, and where the installed rosbag2_interfaces has
+# this exact shape it is offered under that type, so a client written against stock rosbag2 can
+# drive it. Jazzy's Record has no start_time and Kilted has no Record at all, so there the
+# service is offered under this copy instead, with the same fields and the same behaviour.
+# The recorder's CMake and dynrec.services make the same choice from the same evidence.
+# See GetSubscribedTopics.srv for the reasoning behind copying rather than depending.
+
+# Optional path where the new folder for recording will be created. If provided, it will override
+# the storage_options.uri provided during construction. Empty by default.
+string uri
+
+# Timestamp in the future when to start recording.
+# If empty or time in the past, recording starts immediately.
+builtin_interfaces/Time start_time
+---
+# Return code. Returns 1 when recording is already running or in case of error, otherwise 0.
+int32 return_code
+# Error string. Empty if no error occurred.
+string error_string

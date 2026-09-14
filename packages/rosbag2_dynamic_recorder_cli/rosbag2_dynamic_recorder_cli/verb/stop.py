@@ -12,10 +12,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+from dynrec.services import Stop
 from rosbag2_dynamic_recorder_cli.api import add_recorder_arguments, report, with_recorder
 from rosbag2_dynamic_recorder_cli.verb import VerbExtension
-
-from rosbag2_interfaces.srv import Stop
 
 
 class StopVerb(VerbExtension):

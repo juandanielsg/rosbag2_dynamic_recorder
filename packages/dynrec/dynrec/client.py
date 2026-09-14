@@ -59,7 +59,13 @@ from rosbag2_dynamic_recorder_interfaces.srv import (
     SubscribeTopics,
     UnsubscribeTopics,
 )
-from rosbag2_interfaces.srv import (
+
+from dynrec.discovery import choose_recorder, recorder_nodes
+from dynrec.errors import CallFailed, CallTimeout, ServiceUnavailable
+from dynrec.results import Event, Profiles, Status, TopicChange
+# Not from rosbag2_interfaces directly: which definition of these the recorder offers depends on
+# the installed rosbag2, and dynrec.services resolves that the same way the recorder does.
+from dynrec.services import (
     IsPaused,
     Pause,
     Record,
@@ -69,10 +75,6 @@ from rosbag2_interfaces.srv import (
     Stop,
     TogglePaused,
 )
-
-from dynrec.discovery import choose_recorder, recorder_nodes
-from dynrec.errors import CallFailed, CallTimeout, ServiceUnavailable
-from dynrec.results import Event, Profiles, Status, TopicChange
 from dynrec.schedule import apply_schedule, parse_time
 from dynrec.topics import parse_topic_specs, require_a_selection
 

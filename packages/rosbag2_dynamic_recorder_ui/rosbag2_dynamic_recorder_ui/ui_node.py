@@ -46,7 +46,7 @@ from rosbag2_dynamic_recorder_interfaces.srv import (
     SubscribeTopics,
     UnsubscribeTopics,
 )
-from rosbag2_interfaces.srv import Pause, Record, Resume, Snapshot, SplitBagfile, Stop
+from dynrec.services import Pause, Record, Resume, Snapshot, SplitBagfile, Stop
 
 #: How many events to keep. The feed shows a handful; the timeline needs the rest, and the
 #: recorder retains only ten for late joiners, so anything earlier than this page simply was

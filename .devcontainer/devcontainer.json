@@ -1,0 +1,8 @@
+{
+  "name": "rosbag2_dynamic_recorder",
+  "dockerComposeFile": "docker-compose.yml",
+  "service": "rosbag2-dev",
+  "workspaceFolder": "/home/rosbag/ros2_ws",
+  "remoteUser": "rosbag",
+  "shutdownAction": "none"
+}

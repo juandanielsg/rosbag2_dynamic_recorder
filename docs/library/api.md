@@ -75,3 +75,15 @@ fetching one, which makes the rule testable without a ROS graph.
    :members:
    :member-order: bysource
 ```
+
+## Service types
+
+```{eval-rst}
+.. automodule:: dynrec.services
+   :members: type_name
+```
+
+The module also exposes `IsPaused`, `Pause`, `Record`, `Resume`, `Snapshot`, `SplitBagfile`,
+`Stop`, `TogglePaused` and `MessagesLostEvent`: the class the recorder built on the same install
+offers each under, stock or copy. `Recorder` uses them internally; take them from here rather than
+from `rosbag2_interfaces` when calling the services by hand.

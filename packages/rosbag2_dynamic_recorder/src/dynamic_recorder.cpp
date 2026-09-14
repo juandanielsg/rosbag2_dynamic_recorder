@@ -133,10 +133,18 @@ DynamicRecorder::DynamicRecorder(const rclcpp::NodeOptions & options)
   // Snapshot mode is a circular buffer flushed on demand, so it is meaningless without a cache.
   // The writer accepts either bound: a cache limited only by duration is a valid buffer.
   storage_options_.max_cache_size = static_cast<uint64_t>(max_cache_size);
+#if ROSBAG2_DYNAMIC_RECORDER_HAS_MAX_CACHE_DURATION
   storage_options_.max_cache_duration = static_cast<uint32_t>(max_cache_duration);
-  if (snapshot_mode_ && storage_options_.max_cache_size == 0 &&
-    storage_options_.max_cache_duration == 0)
-  {
+#else
+  // The parameter is declared on every distro so a params file written for one loads on all of
+  // them, but Jazzy and Kilted have no time bound on the cache to hand it to. Refusing is better
+  // than silently writing synchronously when the operator asked for a buffer.
+  if (max_cache_duration != 0) {
+    throw std::invalid_argument(
+      "max_cache_duration is not supported by this rosbag2; use max_cache_size");
+  }
+#endif
+  if (snapshot_mode_ && storage_options_.max_cache_size == 0 && max_cache_duration == 0) {
     throw std::invalid_argument(
       "snapshot_mode requires max_cache_size > 0 or max_cache_duration > 0");
   }
@@ -159,7 +167,7 @@ DynamicRecorder::DynamicRecorder(const rclcpp::NodeOptions & options)
     storage_preset_profile.c_str(),
     snapshot_mode_ ? " [snapshot mode]" : "",
     paused_.load() ? " [started paused]" : "");
-  if (storage_options_.max_cache_size == 0 && storage_options_.max_cache_duration == 0) {
+  if (storage_options_.max_cache_size == 0 && max_cache_duration == 0) {
     // Synchronous writes hold the subscription callback for the duration of each disk write.
     // That is exactly the condition under which publishers overwrite their own history unseen,
     // so say so once rather than let it show up later as an unexplained messages_missed.
@@ -295,7 +303,7 @@ DynamicRecorder::DynamicRecorder(const rclcpp::NodeOptions & options)
             return;  // Topics with no losses are not reported, matching the upstream contract.
           }
           for (const auto & [topic_name, counts] : messages_lost_since_last_event_) {
-            rosbag2_interfaces::msg::MessagesLostEventTopicStat stat;
+            decltype(event.messages_lost_statistics)::value_type stat;
             stat.topic_name = topic_name;
             stat.messages_lost_in_transport = counts.in_transport;
             stat.messages_lost_in_recorder = counts.in_recorder;
@@ -327,6 +335,14 @@ DynamicRecorder::~DynamicRecorder()
   stop();
 }
 
+void DynamicRecorder::silence(Subscription & subscription)
+{
+  subscription.enabled->store(false, std::memory_order_release);
+#if ROSBAG2_DYNAMIC_RECORDER_HAS_DISABLE_CALLBACKS
+  subscription.handle->disable_callbacks();
+#endif
+}
+
 void DynamicRecorder::stop()
 {
   {
@@ -344,7 +360,7 @@ void DynamicRecorder::stop()
     topics_at_stop_.reserve(subscriptions_.size());
     for (auto & [topic_name, subscription] : subscriptions_) {
       topics_at_stop_.push_back(topic_name);
-      subscription->disable_callbacks();
+      silence(subscription);
     }
     std::sort(topics_at_stop_.begin(), topics_at_stop_.end());
     subscriptions_.clear();
@@ -483,10 +499,15 @@ bool DynamicRecorder::subscribe_topic(
       std::lock_guard<std::mutex> lock(messages_lost_mutex_);
       messages_lost_since_last_event_[topic_name].in_transport += info.total_count_change;
     };
+  auto enabled = std::make_shared<std::atomic<bool>>(true);
   auto callback =
-    [this, topic_name, topic_type](
+    [this, topic_name, topic_type, enabled](
     std::shared_ptr<const rclcpp::SerializedMessage> message, const rclcpp::MessageInfo & info)
     {
+      // See Subscription: this subscription may already have been dropped.
+      if (!enabled->load(std::memory_order_acquire)) {
+        return;
+      }
       rcutils_time_point_value_t recv_timestamp{0};
       rcutils_time_point_value_t send_timestamp{0};
       // Ported from rosbag2_transport::RecorderImpl::create_subscription(): rmw_connextdds on
@@ -568,7 +589,7 @@ bool DynamicRecorder::subscribe_topic(
 
   {
     std::lock_guard<std::mutex> lock(subscriptions_mutex_);
-    subscriptions_[topic_name] = std::move(subscription);
+    subscriptions_[topic_name] = Subscription{std::move(subscription), std::move(enabled)};
   }
   RCLCPP_INFO(get_logger(), "Subscribed '%s' [%s]", topic_name.c_str(), topic_type.c_str());
   emit_subscription_change(
@@ -584,7 +605,7 @@ bool DynamicRecorder::unsubscribe_topic(const std::string & topic_name)
     if (it == subscriptions_.end()) {
       return false;
     }
-    it->second->disable_callbacks();
+    silence(it->second);
     subscriptions_.erase(it);
   }
   {
@@ -903,6 +924,7 @@ void DynamicRecorder::setup_writer_events()
   // transport-side losses collected by the subscription message_lost_callback, which put a slow
   // SD card on the status line as "loss reported by transport" and sent the operator to debug
   // the network. Kept apart so the number points at its own remedy.
+#if ROSBAG2_DYNAMIC_RECORDER_HAS_WRITER_MESSAGES_LOST
   callbacks.messages_lost_callback =
     [this](const std::vector<rosbag2_cpp::bag_events::MessagesLostInfo> & infos) {
       std::lock_guard<std::mutex> lock(messages_lost_mutex_);
@@ -911,6 +933,10 @@ void DynamicRecorder::setup_writer_events()
         messages_lost_in_recorder_.fetch_add(info.num_messages_lost);
       }
     };
+#else
+  // Jazzy and Kilted writers do not report their losses, so messages_lost_in_recorder stays 0
+  // there: unknown, not zero, and the docs say so.
+#endif
   writer_->add_event_callbacks(callbacks);
 }
 

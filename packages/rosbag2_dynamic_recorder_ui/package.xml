@@ -21,6 +21,9 @@
   <depend>rclpy</depend>
   <depend>rosbag2_interfaces</depend>
   <depend>rosbag2_dynamic_recorder_interfaces</depend>
+  <!-- For dynrec.services: which rosbag2_interfaces definitions the recorder offers depends on
+       the installed rosbag2, and that module resolves it the same way the recorder does. -->
+  <depend>dynrec</depend>
 
   <exec_depend>ros2launch</exec_depend>
 

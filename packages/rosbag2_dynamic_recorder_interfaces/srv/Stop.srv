@@ -1,0 +1,12 @@
+# Field-identical to rosbag2_interfaces/srv/Stop as of rosbag2 0.34 (Rolling), deliberately.
+#
+# Jazzy and Kilted ship Stop with an empty response, so a client there cannot tell "stopped" from
+# "was not recording". Where the installed rosbag2_interfaces has this shape the recorder offers
+# ~/stop under the stock type; elsewhere under this copy. See Record.srv.
+
+---
+# Return code. Returns 1 when recording or playback is already stopped or in case of error, otherwise 0.
+int32 return_code
+
+# Error string. Empty if no error occurred.
+string error_string

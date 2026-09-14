@@ -14,11 +14,10 @@
 
 import time
 
+from dynrec.services import Record
 from rosbag2_dynamic_recorder_cli.api import add_recorder_arguments, report, with_recorder
 from rosbag2_dynamic_recorder_cli.format import format_duration, parse_time
 from rosbag2_dynamic_recorder_cli.verb import VerbExtension
-
-from rosbag2_interfaces.srv import Record
 
 
 class RecordVerb(VerbExtension):
