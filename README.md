@@ -34,7 +34,7 @@ from source.
 sudo apt install ros-$ROS_DISTRO-rosbag2 ros-$ROS_DISTRO-rosbag2-storage-mcap
 
 mkdir -p ~/ws/src && cd ~/ws/src
-git clone https://github.com/juandanielsg/rosbag2_dynamic_recorder.git
+git clone --branch v0.1.0 https://github.com/juandanielsg/rosbag2_dynamic_recorder.git
 cd ~/ws && colcon build --symlink-install
 source install/setup.bash
 ```
@@ -358,7 +358,9 @@ the full launch-argument list is in [docs/install.md](docs/install.md#launch-arg
 
 Jazzy, Kilted and Rolling, from one branch. CI builds all five packages and runs the full suite in
 `ros:jazzy-ros-base`, `ros:kilted-ros-base` and `ros:rolling-ros-base` on pushes to `main` and on
-PRs; a distro is listed as supported because that job is green on it.
+PRs; a distro is listed as supported because that job is green on it. Releases are tags on `main`
+(`v0.1.0` is the first), each placed on a commit that job has passed, so one tag is a known-good
+ref on every distro; there are no per-distro branches.
 
 | Distro | Status | Differences |
 |---|---|---|

@@ -12,14 +12,17 @@ Everything: the recorder, the CLI, the Python library and the browser UI.
 sudo apt install ros-$ROS_DISTRO-rosbag2 ros-$ROS_DISTRO-rosbag2-storage-mcap
 
 mkdir -p ~/ws/src && cd ~/ws/src
-git clone https://github.com/juandanielsg/rosbag2_dynamic_recorder.git
+git clone --branch v0.1.0 https://github.com/juandanielsg/rosbag2_dynamic_recorder.git
 cd ~/ws
 rosdep install -r -y --from-paths src --ignore-src
 colcon build --symlink-install
 source install/setup.bash
 ```
 
-Five packages, a couple of minutes. Then:
+Five packages, a couple of minutes. `--branch v0.1.0` pins a release; every tag is a commit CI
+has built and tested on Jazzy, Kilted and Rolling, so it is a known-good point on every distro at
+once. Leave the flag off for `main`, which carries the same guarantee for its latest push but
+moves. Then:
 
 ```bash
 ros2 launch rosbag2_dynamic_recorder dynamic_recorder.launch.py \
@@ -114,6 +117,9 @@ The rule for a service is: the stock type where the installed definition is fiel
 wherever that is possible. In Python, import the service classes from `dynrec.services` rather
 than from `rosbag2_interfaces.srv` and they match the recorder built on the same machine.
 `ros2 service type <service>` shows what a running recorder offers.
+
+There are no per-distro branches. A distro-specific difference is a probe and an `#if`, kept
+next to the code it guards, and a release is a tag on `main` that CI has passed on every distro.
 
 Kilted reaches end of life in November 2026. Humble has not been tried; it is older than Jazzy and
 would need its own look.
