@@ -34,7 +34,7 @@ ARGUMENTS = [
     ('topics', '[]', 'Topics to record at startup, as a YAML list. May be empty.'),
     ('start_paused', 'false', 'Start with recording paused.'),
     ('snapshot_mode', 'false', 'Buffer in memory and only write on ~/snapshot.'),
-    ('max_cache_size', '104857600',
+    ('max_cache_size', str(100 * 1024 * 1024),  # the node's own default, 100 MiB
      'Writer cache in bytes. snapshot_mode needs this or max_cache_duration to be > 0.'),
     ('max_cache_duration', '0',
      'Writer cache bound in seconds; 0 for none. Combines with max_cache_size. A bound an '

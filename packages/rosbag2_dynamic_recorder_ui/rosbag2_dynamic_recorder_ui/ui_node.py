@@ -38,6 +38,7 @@ from ament_index_python.packages import get_package_share_directory
 from rclpy.node import Node
 
 from dynrec import DynrecError, Recorder, TopicChange
+from rosbag2_dynamic_recorder_ui import DEFAULT_PORT, DEFAULT_RECORDER_NODE
 
 #: How many events to keep. The feed shows a handful; the timeline needs the rest, and the
 #: recorder retains only ten for late joiners, so anything earlier than this page simply was
@@ -46,6 +47,13 @@ HISTORY_LIMIT = 400
 
 #: Topics that are never useful to record and only clutter the picker.
 HIDDEN_TOPICS = {"/parameter_events", "/rosout"}
+
+#: How long without a status publication before the page says contact is lost. The recorder
+#: publishes every second by default, so this is several missed ticks, not one late one.
+STALE_AFTER_SECONDS = 5.0
+
+#: How often to retry ~/get_profiles while the recorder is not answering yet.
+PROFILES_RETRY_SECONDS = 5.0
 
 
 def _selection(payload):
@@ -92,9 +100,10 @@ def build_state(status, age, recorder, available_topics, history, profiles):
         "available_topics": available_topics,
         "history": sorted(history, key=lambda event: event["stamp"]),
         "profiles": profiles,
+        "stale_after_seconds": STALE_AFTER_SECONDS,
     }
     if status is not None:
-        state.update(status.as_dict(), stale=age is not None and age > 5.0)
+        state.update(status.as_dict(), stale=age is not None and age > STALE_AFTER_SECONDS)
     return state
 
 
@@ -103,9 +112,9 @@ class RecorderUi(Node):
         super().__init__("rosbag2_dynamic_recorder_ui")
 
         self.recorder = self.declare_parameter(
-            "recorder_node", "/rosbag2_dynamic_recorder"
+            "recorder_node", DEFAULT_RECORDER_NODE
         ).value.rstrip("/")
-        self.port = self.declare_parameter("port", 8088).value
+        self.port = self.declare_parameter("port", DEFAULT_PORT).value
         self.bind = self.declare_parameter("bind", "127.0.0.1").value
 
         self._lock = threading.Lock()
@@ -142,8 +151,8 @@ class RecorderUi(Node):
         """Keep trying until profiles are known.
 
         A one-shot attempt that gave up left the profile buttons permanently absent with no way to
-        recover short of restarting the UI. Retrying costs one service call every 5s until it
-        succeeds.
+        recover short of restarting the UI. Retrying costs one service call per
+        PROFILES_RETRY_SECONDS until it succeeds.
         """
         announced = False
         while rclpy.ok():
@@ -155,7 +164,7 @@ class RecorderUi(Node):
                         "Waiting for ~/get_profiles; profile buttons will appear when it responds"
                     )
                     announced = True
-                time.sleep(5.0)
+                time.sleep(PROFILES_RETRY_SECONDS)
                 continue
             with self._lock:
                 self._profiles = [

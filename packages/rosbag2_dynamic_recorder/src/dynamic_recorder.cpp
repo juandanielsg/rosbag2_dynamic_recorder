@@ -42,6 +42,15 @@ namespace
 constexpr int kReturnSuccess = 0;
 constexpr int kReturnError = 1;
 
+/// Default writer cache, as rosbag2's own recorder ships it. Also the launch files' default.
+constexpr int64_t kDefaultMaxCacheSize = 100 * 1024 * 1024;
+
+/// Events keep this many for late joiners. The UI's own history depth is chosen against it.
+constexpr size_t kEventHistoryDepth = 10;
+
+/// How many "(N)" suffixes record() tries before giving up on a bag path that already exists.
+constexpr size_t kMaxBagPathSuffix = 10000;
+
 /// Verdict for every service that subscribes a batch. Each requested topic lands in exactly one
 /// of the subscribed/unavailable lists, so "nothing subscribed, something unavailable" means the
 /// whole request failed and the caller has to see that; an empty request stays a success, and a
@@ -141,7 +150,7 @@ DynamicRecorder::DynamicRecorder(const rclcpp::NodeOptions & options)
   // when someone asks for one.
   const auto max_bag_size = declare_parameter<int64_t>("max_bag_size", 0);
   const auto storage_check_period_s = declare_parameter<double>("storage_check_period", 1.0);
-  const auto max_cache_size = declare_parameter<int64_t>("max_cache_size", 100 * 1024 * 1024);
+  const auto max_cache_size = declare_parameter<int64_t>("max_cache_size", kDefaultMaxCacheSize);
   // The rest of rosbag2's StorageOptions, passed through untouched. These are the knobs that
   // decide whether a small computer keeps up: a time-bounded cache is something an operator can
   // reason about where "100 MB" is not, and the MCAP presets trade CPU against disk bandwidth in
@@ -356,12 +365,15 @@ DynamicRecorder::DynamicRecorder(const rclcpp::NodeOptions & options)
     qos, service_callback_group_);
 
   // Events use a small transient-local depth so a late subscriber still sees recent changes.
-  const auto event_qos = rclcpp::QoS(10).transient_local();
+  const auto event_qos = rclcpp::QoS(kEventHistoryDepth).transient_local();
   pub_subscription_change_ =
     create_publisher<SubscriptionChangeEvent>("~/events/subscription_change", event_qos);
   pub_pause_ = create_publisher<PauseEvent>("~/events/pause", event_qos);
   pub_write_split_ = create_publisher<WriteSplitEvent>("~/events/write_split", event_qos);
-  pub_messages_lost_ = create_publisher<MessagesLostEvent>("~/events/messages_lost", rclcpp::QoS(10));
+  // Volatile, unlike the others: each of these carries the losses *since the last one*, so a late
+  // joiner replaying old reports would double-count what the status already totals.
+  pub_messages_lost_ = create_publisher<MessagesLostEvent>(
+    "~/events/messages_lost", rclcpp::QoS(kEventHistoryDepth));
   pub_low_disk_ = create_publisher<LowDiskEvent>("~/events/low_disk", event_qos);
   pub_bag_size_limit_ =
     create_publisher<BagSizeLimitEvent>("~/events/bag_size_limit", event_qos);
@@ -1552,7 +1564,7 @@ bool DynamicRecorder::record(const std::string & uri)
     if (fs::exists(storage_options_.uri, ec)) {
       const fs::path base(storage_options_.uri);
       bool found = false;
-      for (size_t i = 1; i < 10000 && !found; ++i) {
+      for (size_t i = 1; i < kMaxBagPathSuffix && !found; ++i) {
         fs::path candidate = base;
         candidate += "(" + std::to_string(i) + ")";
         if (!fs::exists(candidate, ec)) {
@@ -1562,7 +1574,7 @@ bool DynamicRecorder::record(const std::string & uri)
       }
       if (!found) {
         last_failure_reason_ = "no free bag path near '" + base.generic_string() +
-          "'; 10000 suffixed directories already exist";
+          "'; " + std::to_string(kMaxBagPathSuffix) + " suffixed directories already exist";
         RCLCPP_ERROR(get_logger(), "%s", last_failure_reason_.c_str());
         return false;
       }

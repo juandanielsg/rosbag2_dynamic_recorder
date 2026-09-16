@@ -24,6 +24,9 @@ The time dialect and the mode mapping are dynrec.schedule's -- the verbs hand `-
 
 from dynrec.schedule import TIME_MODES
 
+#: Width of the label column in `status`: the longest label, 'lost (transport):', plus a gap.
+LABEL_WIDTH = 14
+
 
 def add_schedule_arguments(parser, noun):
     """The --at/--mode/--topic trio shared by `resume` and `split`."""
@@ -108,6 +111,11 @@ def free_space_text(status):
     return text
 
 
+def _row(label, value):
+    """One aligned line of the status block. An empty label continues the row above."""
+    return '{:<{}}{}'.format(label + ':' if label else '', LABEL_WIDTH, value)
+
+
 def format_status(status):
     """The human-readable status block for a :class:`dynrec.Status`, as a list of lines.
 
@@ -123,8 +131,8 @@ def format_status(status):
         ('profile', status.active_profile or '(none matches the current selection)'),
         ('topics', '{} subscribed'.format(len(status.subscribed_topics))),
     ]
-    lines = ['{:<14}{}'.format(label + ':', value) for label, value in rows]
-    lines.extend('{:<14}{}'.format('', topic) for topic in status.subscribed_topics)
+    lines = [_row(label, value) for label, value in rows]
+    lines.extend(_row('', topic) for topic in status.subscribed_topics)
 
     if status.messages_missed is None:
         missed = 'unknown (this middleware supplies no publication sequence numbers)'
@@ -146,5 +154,5 @@ def format_status(status):
             if status.max_bag_size else '')),
         ('free space', free_space_text(status)),
     ]
-    lines.extend('{:<14}{}'.format(label + ':', value) for label, value in counters)
+    lines.extend(_row(label, value) for label, value in counters)
     return lines

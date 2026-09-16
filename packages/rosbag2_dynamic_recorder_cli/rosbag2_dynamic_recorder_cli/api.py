@@ -28,6 +28,10 @@ from dynrec.results import TopicChange
 
 from rosbag2_dynamic_recorder_cli.format import format_topic_group
 
+#: Seconds of graph discovery before looking for the recorder. Shorter than the library's
+#: default: a person at a terminal is running this against a recorder that is already up.
+DEFAULT_SPIN_TIME = 1.0
+
 
 def ambiguous_message(exc):
     """dynrec refuses to guess between recorders; a command line says which flag resolves it."""
@@ -48,7 +52,7 @@ def add_recorder_arguments(parser):
         '--timeout', type=float, default=DEFAULT_TIMEOUT, metavar='N',
         help='Seconds to wait for the service and for its reply (default: %(default)s)')
     parser.add_argument(
-        '--spin-time', type=float, default=1.0, metavar='N',
+        '--spin-time', type=float, default=DEFAULT_SPIN_TIME, metavar='N',
         help='Seconds to spin for graph discovery before looking for the recorder '
              '(default: %(default)s)')
 

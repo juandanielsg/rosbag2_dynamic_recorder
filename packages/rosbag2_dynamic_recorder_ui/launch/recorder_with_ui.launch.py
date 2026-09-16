@@ -31,6 +31,8 @@ from launch.actions import DeclareLaunchArgument, OpaqueFunction
 from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
 
+from rosbag2_dynamic_recorder_ui import DEFAULT_PORT, DEFAULT_RECORDER_NODE
+
 ARGUMENTS = [
     ('uri', 'dynamic_bag', 'Output bag path.'),
     ('topics', '[]', 'Topics to record at startup, as a YAML list. May be empty; pick in the UI.'),
@@ -38,7 +40,7 @@ ARGUMENTS = [
     ('serialization_format', 'cdr', 'Message serialization format.'),
     ('start_paused', 'false', 'Start with recording paused.'),
     ('snapshot_mode', 'false', 'Buffer in memory and only write on request.'),
-    ('max_cache_size', '104857600',
+    ('max_cache_size', str(100 * 1024 * 1024),  # the node's own default, 100 MiB
      'Writer cache in bytes. snapshot_mode needs this or max_cache_duration to be > 0.'),
     ('max_cache_duration', '0',
      'Writer cache bound in seconds; 0 for none. Combines with max_cache_size. A bound an '
@@ -63,7 +65,7 @@ ARGUMENTS = [
     ('messages_lost_report_period', '5.0',
      'Seconds between MessagesLostEvent publications. 0 disables reporting.'),
     ('params_file', '', 'Optional YAML of extra recorder parameters, e.g. recording profiles.'),
-    ('port', '8088', 'Port for the browser UI.'),
+    ('port', str(DEFAULT_PORT), 'Port for the browser UI.'),
     ('bind', '127.0.0.1',
      'Address the UI listens on. Loopback by default because the UI has no authentication; use 0.0.0.0 only on a trusted network.'),
 ]
@@ -128,7 +130,7 @@ def _setup(context, *_args, **_kwargs):
         Node(
             package='rosbag2_dynamic_recorder',
             executable='dynamic_recorder',
-            name='rosbag2_dynamic_recorder',
+            name=DEFAULT_RECORDER_NODE.lstrip('/'),
             output='screen',
             parameters=parameters,
         ),
@@ -140,7 +142,7 @@ def _setup(context, *_args, **_kwargs):
             parameters=[{
                 'port': int(LaunchConfiguration('port').perform(context)),
                 'bind': LaunchConfiguration('bind').perform(context),
-                'recorder_node': '/rosbag2_dynamic_recorder',
+                'recorder_node': DEFAULT_RECORDER_NODE,
             }],
         ),
     ]

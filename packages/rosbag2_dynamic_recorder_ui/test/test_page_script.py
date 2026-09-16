@@ -63,6 +63,7 @@ SAMPLE_STATE = {
     "subscribed_topics": ["/spike/a", "/spike/c"],
     "active_profile": "",
     "available_topics": ["/spike/a", "/spike/b", "/spike/c"],
+    "stale_after_seconds": 5.0,
     "messages_written": 1234,
     # None on purpose: the page must render this as unknown, and that branch has to be walked.
     "messages_missed": None,

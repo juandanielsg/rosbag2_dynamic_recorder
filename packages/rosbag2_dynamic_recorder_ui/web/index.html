@@ -99,7 +99,6 @@
   .filterbar { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 12px; }
   .filterbar input[type="search"] { flex: 1 1 200px; min-width: 0; font: inherit; padding: 7px 11px;
       border-radius: 8px; border: 1px solid var(--line); background: var(--bg); color: var(--fg); }
-  .filterbar input[type="search"].bad { border-color: var(--bad); }
   .seg { display: inline-flex; border: 1px solid var(--line); border-radius: 8px; overflow: hidden; }
   .seg button { border: 0; border-radius: 0; padding: 7px 12px; font-size: 13px; }
   .seg button + button { border-left: 1px solid var(--line); }
@@ -197,6 +196,10 @@ let pending = null;
 let state = null;
 let busy = false;
 
+// The first event this page saw can trail the recording start by the poll interval and the
+// event's own delivery; only a gap wider than that means history was genuinely not observed.
+const UNOBSERVED_SLACK_S = 0.5;
+
 const $ = (id) => document.getElementById(id);
 const fmtInt = (n) => n.toLocaleString();
 const esc = (t) => t.replace(/[&<>"]/g,
@@ -239,7 +242,7 @@ function health(s) {
   }
   if (s.stale) {
     return { cls: "bad", text: "Lost contact with the recorder",
-             note: "No status update for several seconds." };
+             note: `No status update for more than ${s.stale_after_seconds}s.` };
   }
   if (!s.recording) {
     // A stop the recorder chose is the one a reader most needs explained.
@@ -479,7 +482,7 @@ function renderTimeline(s) {
     name.title = topic;
     const track = document.createElement("div");
     track.className = "tl-track";
-    if (seenFrom > t0 + 0.5) {
+    if (seenFrom > t0 + UNOBSERVED_SLACK_S) {
       const unseen = document.createElement("div");
       unseen.className = "tl-unseen";
       unseen.style.left = "0%";
@@ -513,7 +516,7 @@ function renderTimeline(s) {
   }
   tl.appendChild(axis);
 
-  $("tl-note").textContent = seenFrom > t0 + 0.5
+  $("tl-note").textContent = seenFrom > t0 + UNOBSERVED_SLACK_S
     ? "Hatched: before this page connected. The recorder keeps only its ten most recent events " +
       "for a client that joins late, so what happened earlier was not observed."
     : "";
