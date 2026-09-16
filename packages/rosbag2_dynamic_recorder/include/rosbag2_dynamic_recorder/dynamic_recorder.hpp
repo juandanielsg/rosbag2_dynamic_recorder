@@ -29,7 +29,11 @@
 
 #include "rclcpp/rclcpp.hpp"
 #include "rclcpp/serialization.hpp"
-#include "rosbag2_cpp/writer.hpp"
+#include "rosbag2_dynamic_recorder/bag.hpp"
+#include "rosbag2_dynamic_recorder/loss_accounting.hpp"
+#include "rosbag2_dynamic_recorder/recorder_config.hpp"
+#include "rosbag2_dynamic_recorder/scheduler.hpp"
+#include "rosbag2_dynamic_recorder/storage_guard.hpp"
 #include "rosbag2_storage/storage_options.hpp"
 
 #include "rosbag2_interfaces/msg/write_split_event.hpp"
@@ -287,18 +291,6 @@ private:
     const std::shared_ptr<GetProfiles::Request> request,
     std::shared_ptr<GetProfiles::Response> response);
 
-  /// Sum of the file sizes in the bag directory. Returns 0 rather than throwing if the directory
-  /// cannot be read, since a status call must not fail just because of a stat error.
-  ///
-  /// Cached briefly: this is called from the status publication every second, and a robot
-  /// recording for hours accumulates split files that would otherwise all be stat'ed each time.
-  uint64_t bag_size_bytes() const;
-
-  /// The walk behind bag_size_bytes(), bypassing the cache and refreshing it. The size guard uses
-  /// this directly: a limit should be enforced on what is on disk now, not on a reading up to
-  /// kBagSizeCacheTtl old.
-  uint64_t measure_bag_size() const;
-
   /// Single source of truth for both ~/status and ~/get_status, so the two cannot drift.
   RecorderStatus build_status() const;
 
@@ -344,17 +336,6 @@ private:
   void emit_event(
     const typename rclcpp::Publisher<EventT>::SharedPtr & pub, bool record, EventT & event);
 
-  /// Append an already-serialized event to the open bag on `event_topic`, creating the channel on
-  /// first use. Takes the writer lock and releases it before returning -- callers such as pause()
-  /// go on to call publish_status(), which takes the same lock, and std::mutex is not recursive.
-  ///
-  /// Deliberately not gated on paused_: an event that explains a pause cannot itself be suppressed
-  /// by that pause.
-  void write_event_to_bag(
-    const std::string & event_topic, const std::string & event_type,
-    std::shared_ptr<const rclcpp::SerializedMessage> serialized,
-    const builtin_interfaces::msg::Time & stamp);
-
   /// Graph topics a pattern is allowed to match.
   ///
   /// Excludes this node's own topics: the event channels are already written into the bag
@@ -377,57 +358,48 @@ private:
     std::vector<std::string> & topics_out, std::vector<std::string> & types_out,
     std::string & error_out) const;
 
-  /// Register write-split and messages-lost callbacks on the writer.
-  void setup_writer_events();
+  /// The write-split and messages-lost callbacks a bag is opened with.
+  Bag::EventCallbacks writer_event_callbacks();
 
-  /// A resume or split asked for at a future timestamp rather than immediately.
-  ///
-  /// Node-time requests are driven by a one-shot timer, so they fire even on a silent robot.
-  /// Publish- and receive-time requests can only be evaluated against arriving messages, so they
-  /// are checked in the subscription callback and will not fire if the traffic stops.
-  struct ScheduledAction
+  /// Offer `~/<name>` on the service callback group, handled by `handler`.
+  template<typename SrvT>
+  typename rclcpp::Service<SrvT>::SharedPtr serve(
+    const std::string & name,
+    void (DynamicRecorder::* handler)(
+      std::shared_ptr<typename SrvT::Request>, std::shared_ptr<typename SrvT::Response>))
   {
-    bool active{false};
-    rcutils_time_point_value_t at_ns{0};
-    int32_t mode{0};
-    /// Empty means any topic satisfies the comparison.
-    std::string tracking_topic;
+    return create_service<SrvT>(
+      "~/" + name,
+      std::bind(handler, this, std::placeholders::_1, std::placeholders::_2),
+      rclcpp::ServicesQoS(), service_callback_group_);
+  }
+
+  /// What a scheduled service answers with. The codes are the service's own constants, passed
+  /// in because Resume and SplitBagfile number theirs differently.
+  struct ScheduleCodes
+  {
+    int32_t success;
+    int32_t invalid_mode;
+    int32_t invalid_topic;
+    /// For an immediate action that reports failure; unused by a kind that cannot fail.
+    int32_t failed;
+  };
+  struct ScheduleOutcome
+  {
+    int32_t code;
+    std::string error;
   };
 
-  /// Fire any message-timestamp-driven schedule this message satisfies.
-  /// Called from the subscription callback before the writer lock is taken.
-  void check_scheduled(
-    const std::string & topic_name,
-    rcutils_time_point_value_t send_timestamp,
-    rcutils_time_point_value_t recv_timestamp);
+  /// The one path behind Resume and SplitBagfile: run `action` now for a zero time, arm a
+  /// node-time timer, or queue a message-time schedule. `action` gets the reason to stamp on the
+  /// event and returns whether it succeeded.
+  ScheduleOutcome schedule_or_run(
+    Scheduler::Kind kind, const builtin_interfaces::msg::Time & at, int32_t mode,
+    const std::string & tracking_topic, const ScheduleCodes & codes,
+    std::function<bool(const std::string &)> action);
 
-  /// Forget every pending schedule. A split queued against a bag that has since been closed, or
-  /// a resume queued before a stop, must not fire against the next recording.
-  void clear_scheduled();
-
-  /// Arm a one-shot node-time timer into `slot`, cancelling any pending one. A cancelled timer's
-  /// callback never runs: the executor holds service_callback_group_ from TimerBase::call() to
-  /// the callback, so nothing can cancel or replace the timer in between. `slot` must be a member
-  /// of this node, since the callback outlives this call.
-  void arm_timer(
-    rclcpp::TimerBase::SharedPtr & slot, std::chrono::nanoseconds delta,
-    std::function<void()> action);
-
-  /// Validate a requested mode and tracking topic. Returns an error code, or 0 when usable.
-  int32_t validate_schedule(
-    int32_t mode, const std::string & tracking_topic,
-    int32_t invalid_mode_code, int32_t invalid_topic_code) const;
-
-  std::unique_ptr<rosbag2_cpp::Writer> writer_;
-  /// Guards writer_ access and recording_. rosbag2_cpp::Writer has its own internal lock, but we
-  /// need recording_ and the write call to be consistent: without this, a write can land after
-  /// stop() has closed the writer.
-  mutable std::mutex writer_mutex_;
-  bool recording_{false};
-
-  /// Topics for which a writer channel already exists. create_topic() is idempotent, but
-  /// resolving a message definition costs ~300-470ms, so skipping it matters.
-  std::unordered_map<std::string, std::string> known_channels_;
+  /// The open bag, its channels and its counters. Owns the only writer lock.
+  Bag bag_;
 
   /// A subscription, the switch that silences it, and its sequence bookkeeping.
   ///
@@ -447,7 +419,7 @@ private:
   {
     rclcpp::GenericSubscription::SharedPtr handle;
     std::shared_ptr<std::atomic<bool>> enabled;
-    std::shared_ptr<std::unordered_map<std::string, uint64_t>> last_publication_seq;
+    std::shared_ptr<LossAccounting::SequenceMap> last_publication_seq;
   };
   static void silence(Subscription & subscription);
 
@@ -487,34 +459,13 @@ private:
   /// service callback on a different thread.
   std::atomic_bool paused_{false};
 
-  /// Messages detected as missing from gaps in the per-subscription publication sequences.
-  std::atomic_uint64_t messages_missed_{0};
-  std::atomic_bool sequence_numbers_available_{false};
-
-  /// Losses on one topic since the last MessagesLostEvent, kept by origin so the event can fill
-  /// both of rosbag2's per-topic fields rather than filing everything under transport.
-  struct LostCounts
-  {
-    uint64_t in_transport{0};
-    uint64_t in_recorder{0};
-  };
-  std::unordered_map<std::string, LostCounts> messages_lost_since_last_event_;
-  std::atomic_uint64_t messages_lost_in_transport_{0};
-  std::atomic_uint64_t messages_lost_in_recorder_{0};
-  std::mutex messages_lost_mutex_;
+  /// Missed, transport-lost and writer-lost counts, and the per-topic deltas the periodic
+  /// MessagesLostEvent reports.
+  LossAccounting losses_;
   rclcpp::TimerBase::SharedPtr messages_lost_timer_;
 
-  mutable std::mutex scheduled_mutex_;
-  ScheduledAction scheduled_resume_;
-  ScheduledAction scheduled_split_;
-  std::string scheduled_record_uri_;
-  /// Fast path for the message callback: false means no message-time schedule can fire, so
-  /// check_scheduled() can return without taking scheduled_mutex_ on every arriving message.
-  /// Written under scheduled_mutex_ and read with a relaxed load.
-  std::atomic_bool schedule_pending_{false};
-  rclcpp::TimerBase::SharedPtr resume_timer_;
-  rclcpp::TimerBase::SharedPtr split_timer_;
-  rclcpp::TimerBase::SharedPtr record_timer_;
+  /// Resume, split and record requests for a future time, node-time or message-time.
+  std::unique_ptr<Scheduler> scheduler_;
 
   /// Reason stamped onto the next SubscriptionChangeEvent. Safe as shared state because every
   /// service handler runs in service_callback_group_, which is MutuallyExclusive: only one
@@ -525,24 +476,9 @@ private:
   /// current_reason_'s safety argument: only one service handler runs at a time.
   std::string last_failure_reason_;
 
-  /// Messages that arrived but could not be written. Surfaced in the status because silently
-  /// dropping them would be worse than the crash this replaced.
-  std::atomic_uint64_t write_errors_{0};
+  /// Everything read from the parameters. Read-only after construction, so no lock is needed.
+  RecorderConfig config_;
 
-  std::string serialization_format_;
-  bool record_subscription_events_{true};
-  bool record_pause_events_{true};
-  bool record_low_disk_events_{true};
-  bool record_bag_size_limit_events_{true};
-  bool snapshot_mode_{false};
-
-  /// Free space kept on the bag's filesystem, in bytes and as a percentage. Either may be 0 to
-  /// disable that half; both 0 disables the check entirely, which is the default so nothing changes
-  /// for a recorder that does not ask for it. When both are set the stricter threshold applies.
-  uint64_t min_free_space_{0};
-  double min_free_space_percent_{0.0};
-  /// Upper bound on the bag directory, across every split, in bytes. 0 disables, the default.
-  uint64_t max_bag_size_{0};
   /// One timer paces both guards: they fire rarely, and staggering them buys nothing.
   rclcpp::TimerBase::SharedPtr storage_check_timer_;
   /// Why the recorder stopped itself, for the status. Each guard fires once per recording because
@@ -550,26 +486,12 @@ private:
   std::atomic_bool stopped_for_low_disk_{false};
   std::atomic_bool stopped_for_max_bag_size_{false};
 
-  std::string uri_;
-  std::string storage_id_;
-
-  /// Short-lived cache for bag_size_bytes(). Mutable because the getter is const and this is
-  /// memoisation, not state. See kBagSizeCacheTtl for why staleness here is acceptable.
-  mutable std::mutex size_cache_mutex_;
-  mutable uint64_t cached_bag_size_{0};
-  mutable std::chrono::steady_clock::time_point bag_size_cached_at_{};
-  /// Kept so a new bag can be opened after stop() without reconstructing the node.
+  /// The disk floor and bag ceiling, and the bag-size figure the status reports.
+  std::unique_ptr<StorageGuard> storage_guard_;
+  /// config_.storage plus the uri suffix record() picks when the configured path is taken.
   rosbag2_storage::StorageOptions storage_options_;
-  rosbag2_cpp::ConverterOptions converter_options_;
-  /// Topic selection at the moment of stop(), restored by record().
+  /// Topic selection at the moment of stop(), restored by record(). Under subscriptions_mutex_.
   std::vector<std::string> topics_at_stop_;
-
-  /// Configured profiles, in declaration order so a UI lists them predictably. Read-only after
-  /// construction, so no lock is needed.
-  std::vector<std::pair<std::string, std::vector<std::string>>> profiles_;
-  rclcpp::Time recording_started_;
-  std::atomic_uint64_t messages_written_{0};
-  std::atomic_uint64_t bag_splits_{0};
 };
 
 }  // namespace rosbag2_dynamic_recorder

@@ -14,6 +14,12 @@
 
 #include "rosbag2_dynamic_recorder/dynamic_recorder.hpp"
 
+#include "rosbag2_dynamic_recorder/bag.hpp"
+#include "rosbag2_dynamic_recorder/loss_accounting.hpp"
+#include "rosbag2_dynamic_recorder/recorder_config.hpp"
+#include "rosbag2_dynamic_recorder/scheduler.hpp"
+#include "rosbag2_dynamic_recorder/storage_guard.hpp"
+
 #include <algorithm>
 #include <filesystem>
 #include <memory>
@@ -42,9 +48,6 @@ namespace
 constexpr int kReturnSuccess = 0;
 constexpr int kReturnError = 1;
 
-/// Default writer cache, as rosbag2's own recorder ships it. Also the launch files' default.
-constexpr int64_t kDefaultMaxCacheSize = 100 * 1024 * 1024;
-
 /// Events keep this many for late joiners. The UI's own history depth is chosen against it.
 constexpr size_t kEventHistoryDepth = 10;
 
@@ -69,202 +72,36 @@ void set_subscribe_result(ResponseT & response, bool subscribed_any, const std::
     : (response.unavailable_topics.empty() ? "" : reason);
 }
 
-/// How long a bag-size measurement stays good enough to reuse.
-///
-/// The status is published every second and this is the only field in it that costs real work.
-/// Bag size is already documented as bytes flushed rather than bytes captured, so a few seconds
-/// of staleness on top changes nothing a caller could act on -- unlike the liveness fields, which
-/// are always computed fresh.
-constexpr auto kBagSizeCacheTtl = std::chrono::seconds(3);
-
-// Shared by Resume and SplitBagfile: 0 = node clock, 1 = message publish time, 2 = receive time.
-constexpr int32_t kModeNodeTime = 0;
-constexpr int32_t kModePublishTime = 1;
-constexpr int32_t kModeReceiveTime = 2;
-
 rcutils_time_point_value_t to_nanoseconds(const builtin_interfaces::msg::Time & stamp)
 {
   return static_cast<rcutils_time_point_value_t>(stamp.sec) * kNanosecondsPerSecond +
          stamp.nanosec;
 }
 
-struct SpaceInfo
-{
-  uint64_t free_bytes{0};
-  uint64_t total_bytes{0};
-  bool valid{false};
-};
-
-/// Free and total bytes on the filesystem holding `path`.
-///
-/// `available` rather than `free`: reserved blocks are not writable by an ordinary process, and
-/// counting them as free would let the check fire too late on exactly the embedded filesystems it
-/// exists to protect. An unreadable filesystem comes back invalid rather than zero.
-SpaceInfo filesystem_space(const std::string & path)
-{
-  SpaceInfo info;
-  std::error_code ec;
-  const auto space = std::filesystem::space(path, ec);
-  if (ec) {
-    return info;
-  }
-  info.free_bytes = static_cast<uint64_t>(space.available);
-  info.total_bytes = static_cast<uint64_t>(space.capacity);
-  info.valid = true;
-  return info;
-}
-
-/// The minimum free space `space` falls short of, or nothing if it does not. The threshold is the
-/// stricter of a byte minimum and a percentage of the filesystem. A failed measurement is unknown,
-/// not empty: never stop on a number that could not be read.
-std::optional<uint64_t> breached_min_free_space(
-  const SpaceInfo & space, uint64_t min_bytes, double min_percent)
-{
-  if (!space.valid) {
-    return std::nullopt;
-  }
-  const auto percent_bytes =
-    static_cast<uint64_t>(static_cast<double>(space.total_bytes) * min_percent / 100.0);
-  const uint64_t threshold = std::max(min_bytes, percent_bytes);
-  if (space.free_bytes >= threshold) {
-    return std::nullopt;
-  }
-  return threshold;
-}
 }  // namespace
 
 DynamicRecorder::DynamicRecorder(const rclcpp::NodeOptions & options)
-: rclcpp::Node("rosbag2_dynamic_recorder", options)
+: rclcpp::Node("rosbag2_dynamic_recorder", options), bag_(get_logger(), get_clock())
 {
-  const auto uri = declare_parameter<std::string>("uri", "dynamic_bag");
-  const auto storage_id = declare_parameter<std::string>("storage_id", "mcap");
-  uri_ = uri;
-  storage_id_ = storage_id;
-  serialization_format_ = declare_parameter<std::string>("serialization_format", "cdr");
-  record_subscription_events_ = declare_parameter<bool>("record_subscription_events", true);
-  record_pause_events_ = declare_parameter<bool>("record_pause_events", true);
-  record_low_disk_events_ = declare_parameter<bool>("record_low_disk_events", true);
-  record_bag_size_limit_events_ = declare_parameter<bool>("record_bag_size_limit_events", true);
-  snapshot_mode_ = declare_parameter<bool>("snapshot_mode", false);
-  // The disk guard. Both thresholds default to 0, which disables the check entirely and leaves
-  // behaviour unchanged for anyone who does not ask for it. When both are set the stricter applies.
-  const auto min_free_space = declare_parameter<int64_t>("min_free_space", 0);
-  const auto min_free_space_percent = declare_parameter<double>("min_free_space_percent", 0.0);
-  // The bag's own cap. max_bagfile_size below only rolls to a new file; this bounds the whole
-  // directory and stops. 0 disables, the default, so an unattended recorder only gets a ceiling
-  // when someone asks for one.
-  const auto max_bag_size = declare_parameter<int64_t>("max_bag_size", 0);
-  const auto storage_check_period_s = declare_parameter<double>("storage_check_period", 1.0);
-  const auto max_cache_size = declare_parameter<int64_t>("max_cache_size", kDefaultMaxCacheSize);
-  // The rest of rosbag2's StorageOptions, passed through untouched. These are the knobs that
-  // decide whether a small computer keeps up: a time-bounded cache is something an operator can
-  // reason about where "100 MB" is not, and the MCAP presets trade CPU against disk bandwidth in
-  // either direction. Without them the writer runs on defaults that nothing here can change.
-  const auto max_cache_duration = declare_parameter<int64_t>("max_cache_duration", 0);
-  const auto max_bagfile_size = declare_parameter<int64_t>("max_bagfile_size", 0);
-  const auto max_bagfile_duration = declare_parameter<int64_t>("max_bagfile_duration", 0);
-  const auto storage_preset_profile = declare_parameter<std::string>("storage_preset_profile", "");
-  const auto storage_config_uri = declare_parameter<std::string>("storage_config_uri", "");
-  const std::pair<const char *, int64_t> non_negative[] = {
-    {"max_cache_size", max_cache_size},
-    {"max_cache_duration", max_cache_duration},
-    {"max_bagfile_size", max_bagfile_size},
-    {"max_bagfile_duration", max_bagfile_duration},
-    {"min_free_space", min_free_space},
-    {"max_bag_size", max_bag_size}};
-  for (const auto & [name, value] : non_negative) {
-    if (value < 0) {
-      throw std::invalid_argument(std::string(name) + " must be >= 0");
-    }
-  }
-  if (min_free_space_percent < 0.0 || min_free_space_percent > 100.0) {
-    throw std::invalid_argument("min_free_space_percent must be between 0 and 100");
-  }
-  const bool low_disk_check_enabled = min_free_space > 0 || min_free_space_percent > 0.0;
-  const bool bag_size_check_enabled = max_bag_size > 0;
-  if ((low_disk_check_enabled || bag_size_check_enabled) && storage_check_period_s <= 0.0) {
-    throw std::invalid_argument(
-      "storage_check_period must be > 0 when a free-space minimum or a bag size limit is set");
-  }
-  min_free_space_ = static_cast<uint64_t>(min_free_space);
-  min_free_space_percent_ = min_free_space_percent;
-  max_bag_size_ = static_cast<uint64_t>(max_bag_size);
-  const auto messages_lost_report_period_s =
-    declare_parameter<double>("messages_lost_report_period", 5.0);
-  const auto status_publish_period_s = declare_parameter<double>("status_publish_period", 1.0);
-  paused_ = declare_parameter<bool>("start_paused", false);
-  const auto initial_topics = declare_parameter<std::vector<std::string>>(
-    "topics", std::vector<std::string>{});
+  config_ = rosbag2_dynamic_recorder::declare_parameters(*this);
+  storage_guard_ = std::make_unique<StorageGuard>(StorageGuard::Limits{
+      config_.min_free_space, config_.min_free_space_percent, config_.max_bag_size});
+  storage_options_ = config_.storage;
+  paused_ = config_.start_paused;
 
-  // Profiles are declared as a list of names plus one string-array parameter each, rather than a
-  // nested structure, because ROS 2 parameters have no nested arrays and this keeps a plain YAML
-  // file readable:
-  //   profile_names: ["idle", "navigation"]
-  //   profiles:
-  //     idle: ["/tf", "/odom"]
-  //     navigation: ["/tf", "/odom", "/scan"]
-  const auto profile_names = declare_parameter<std::vector<std::string>>(
-    "profile_names", std::vector<std::string>{});
-  for (const auto & name : profile_names) {
-    if (name.empty()) {
-      RCLCPP_WARN(get_logger(), "Ignoring an empty profile name");
-      continue;
-    }
-    auto topics = declare_parameter<std::vector<std::string>>(
-      "profiles." + name, std::vector<std::string>{});
-    if (topics.empty()) {
-      RCLCPP_WARN(get_logger(),
-        "Profile '%s' lists no topics; applying it would record nothing", name.c_str());
-    }
-    std::sort(topics.begin(), topics.end());
-    topics.erase(std::unique(topics.begin(), topics.end()), topics.end());
-    profiles_.emplace_back(name, std::move(topics));
+  const auto open_error =
+    bag_.open(storage_options_, config_.converter, writer_event_callbacks(), now());
+  if (!open_error.empty()) {
+    throw std::runtime_error(open_error);
   }
-  if (!profiles_.empty()) {
-    RCLCPP_INFO(get_logger(), "Loaded %zu recording profile(s)", profiles_.size());
-  }
-
-  storage_options_.uri = uri;
-  storage_options_.storage_id = storage_id;
-  storage_options_.snapshot_mode = snapshot_mode_;
-  // Snapshot mode is a circular buffer flushed on demand, so it is meaningless without a cache.
-  // The writer accepts either bound: a cache limited only by duration is a valid buffer.
-  storage_options_.max_cache_size = static_cast<uint64_t>(max_cache_size);
-#if ROSBAG2_DYNAMIC_RECORDER_HAS_MAX_CACHE_DURATION
-  storage_options_.max_cache_duration = static_cast<uint32_t>(max_cache_duration);
-#else
-  // The parameter is declared on every distro so a params file written for one loads on all of
-  // them, but Jazzy and Kilted have no time bound on the cache to hand it to. Refusing is better
-  // than silently writing synchronously when the operator asked for a buffer.
-  if (max_cache_duration != 0) {
-    throw std::invalid_argument(
-      "max_cache_duration is not supported by this rosbag2; use max_cache_size");
-  }
-#endif
-  if (snapshot_mode_ && storage_options_.max_cache_size == 0 && max_cache_duration == 0) {
-    throw std::invalid_argument(
-      "snapshot_mode requires max_cache_size > 0 or max_cache_duration > 0");
-  }
-  storage_options_.max_bagfile_size = static_cast<uint64_t>(max_bagfile_size);
-  storage_options_.max_bagfile_duration = static_cast<uint64_t>(max_bagfile_duration);
-  storage_options_.storage_preset_profile = storage_preset_profile;
-  storage_options_.storage_config_uri = storage_config_uri;
-
-  converter_options_.input_serialization_format = serialization_format_;
-  converter_options_.output_serialization_format = serialization_format_;
-
-  writer_ = std::make_unique<rosbag2_cpp::Writer>();
-  writer_->open(storage_options_, converter_options_);
-  recording_ = true;
-  recording_started_ = now();
-  setup_writer_events();
-  RCLCPP_INFO(get_logger(), "Recording to '%s' (storage_id=%s%s%s)%s%s", uri.c_str(),
-    storage_id.c_str(),
-    storage_preset_profile.empty() ? "" : ", preset=",
-    storage_preset_profile.c_str(),
-    snapshot_mode_ ? " [snapshot mode]" : "",
+  RCLCPP_INFO(get_logger(), "Recording to '%s' (storage_id=%s%s%s)%s%s",
+    storage_options_.uri.c_str(),
+    storage_options_.storage_id.c_str(),
+    storage_options_.storage_preset_profile.empty() ? "" : ", preset=",
+    storage_options_.storage_preset_profile.c_str(),
+    config_.snapshot_mode ? " [snapshot mode]" : "",
     paused_.load() ? " [started paused]" : "");
-  if (storage_options_.max_cache_size == 0 && max_cache_duration == 0) {
+  if (!config_.cache_enabled()) {
     // Synchronous writes hold the subscription callback for the duration of each disk write.
     // That is exactly the condition under which publishers overwrite their own history unseen,
     // so say so once rather than let it show up later as an unexplained messages_missed.
@@ -273,101 +110,31 @@ DynamicRecorder::DynamicRecorder(const rclcpp::NodeOptions & options)
       "from its callback, which on slow storage blocks delivery and loses messages nothing reports");
   }
 
-  // Services get their own callback group. Adding a topic costs ~0.5s, almost all of it message
-  // definition resolution inside create_topic(); keeping that off the group that runs subscription
-  // callbacks means an in-flight set_topics cannot stall recording of untouched topics.
+  // Services get their own callback group. Adding a topic resolves its message definition inside
+  // create_topic(), which is milliseconds on a local disk and far more on slow or remote storage;
+  // keeping that off the group that runs subscription callbacks means an in-flight set_topics
+  // cannot stall recording of untouched topics.
   service_callback_group_ = create_callback_group(rclcpp::CallbackGroupType::MutuallyExclusive);
-  const auto qos = rclcpp::ServicesQoS();
-
-  srv_subscribe_topics_ = create_service<SubscribeTopics>(
-    "~/subscribe_topics",
-    std::bind(&DynamicRecorder::handle_subscribe_topics, this,
-      std::placeholders::_1, std::placeholders::_2),
-    qos, service_callback_group_);
-
-  srv_unsubscribe_topics_ = create_service<UnsubscribeTopics>(
-    "~/unsubscribe_topics",
-    std::bind(&DynamicRecorder::handle_unsubscribe_topics, this,
-      std::placeholders::_1, std::placeholders::_2),
-    qos, service_callback_group_);
-
-  srv_set_topics_ = create_service<SetTopics>(
-    "~/set_topics",
-    std::bind(&DynamicRecorder::handle_set_topics, this,
-      std::placeholders::_1, std::placeholders::_2),
-    qos, service_callback_group_);
-
-  srv_get_subscribed_topics_ = create_service<GetSubscribedTopics>(
-    "~/get_subscribed_topics",
-    std::bind(&DynamicRecorder::handle_get_subscribed_topics, this,
-      std::placeholders::_1, std::placeholders::_2),
-    qos, service_callback_group_);
-
-  srv_pause_ = create_service<Pause>(
-    "~/pause",
-    std::bind(&DynamicRecorder::handle_pause, this,
-      std::placeholders::_1, std::placeholders::_2),
-    qos, service_callback_group_);
-
-  srv_resume_ = create_service<Resume>(
-    "~/resume",
-    std::bind(&DynamicRecorder::handle_resume, this,
-      std::placeholders::_1, std::placeholders::_2),
-    qos, service_callback_group_);
-
-  srv_toggle_paused_ = create_service<TogglePaused>(
-    "~/toggle_paused",
-    std::bind(&DynamicRecorder::handle_toggle_paused, this,
-      std::placeholders::_1, std::placeholders::_2),
-    qos, service_callback_group_);
-
-  srv_is_paused_ = create_service<IsPaused>(
-    "~/is_paused",
-    std::bind(&DynamicRecorder::handle_is_paused, this,
-      std::placeholders::_1, std::placeholders::_2),
-    qos, service_callback_group_);
-
-  srv_split_bagfile_ = create_service<SplitBagfile>(
-    "~/split_bagfile",
-    std::bind(&DynamicRecorder::handle_split_bagfile, this,
-      std::placeholders::_1, std::placeholders::_2),
-    qos, service_callback_group_);
-
-  srv_snapshot_ = create_service<Snapshot>(
-    "~/snapshot",
-    std::bind(&DynamicRecorder::handle_snapshot, this,
-      std::placeholders::_1, std::placeholders::_2),
-    qos, service_callback_group_);
-
-  srv_stop_ = create_service<Stop>(
-    "~/stop",
-    std::bind(&DynamicRecorder::handle_stop, this,
-      std::placeholders::_1, std::placeholders::_2),
-    qos, service_callback_group_);
-
-  srv_record_ = create_service<Record>(
-    "~/record",
-    std::bind(&DynamicRecorder::handle_record, this,
-      std::placeholders::_1, std::placeholders::_2),
-    qos, service_callback_group_);
-
-  srv_get_status_ = create_service<GetStatus>(
-    "~/get_status",
-    std::bind(&DynamicRecorder::handle_get_status, this,
-      std::placeholders::_1, std::placeholders::_2),
-    qos, service_callback_group_);
-
-  srv_set_profile_ = create_service<SetProfile>(
-    "~/set_profile",
-    std::bind(&DynamicRecorder::handle_set_profile, this,
-      std::placeholders::_1, std::placeholders::_2),
-    qos, service_callback_group_);
-
-  srv_get_profiles_ = create_service<GetProfiles>(
-    "~/get_profiles",
-    std::bind(&DynamicRecorder::handle_get_profiles, this,
-      std::placeholders::_1, std::placeholders::_2),
-    qos, service_callback_group_);
+  scheduler_ = std::make_unique<Scheduler>(*this, service_callback_group_);
+  srv_subscribe_topics_ =
+    serve<SubscribeTopics>("subscribe_topics", &DynamicRecorder::handle_subscribe_topics);
+  srv_unsubscribe_topics_ =
+    serve<UnsubscribeTopics>("unsubscribe_topics", &DynamicRecorder::handle_unsubscribe_topics);
+  srv_set_topics_ = serve<SetTopics>("set_topics", &DynamicRecorder::handle_set_topics);
+  srv_get_subscribed_topics_ =
+    serve<GetSubscribedTopics>(
+    "get_subscribed_topics", &DynamicRecorder::handle_get_subscribed_topics);
+  srv_pause_ = serve<Pause>("pause", &DynamicRecorder::handle_pause);
+  srv_resume_ = serve<Resume>("resume", &DynamicRecorder::handle_resume);
+  srv_toggle_paused_ = serve<TogglePaused>("toggle_paused", &DynamicRecorder::handle_toggle_paused);
+  srv_is_paused_ = serve<IsPaused>("is_paused", &DynamicRecorder::handle_is_paused);
+  srv_split_bagfile_ = serve<SplitBagfile>("split_bagfile", &DynamicRecorder::handle_split_bagfile);
+  srv_snapshot_ = serve<Snapshot>("snapshot", &DynamicRecorder::handle_snapshot);
+  srv_stop_ = serve<Stop>("stop", &DynamicRecorder::handle_stop);
+  srv_record_ = serve<Record>("record", &DynamicRecorder::handle_record);
+  srv_get_status_ = serve<GetStatus>("get_status", &DynamicRecorder::handle_get_status);
+  srv_set_profile_ = serve<SetProfile>("set_profile", &DynamicRecorder::handle_set_profile);
+  srv_get_profiles_ = serve<GetProfiles>("get_profiles", &DynamicRecorder::handle_get_profiles);
 
   // Events use a small transient-local depth so a late subscriber still sees recent changes.
   const auto event_qos = rclcpp::QoS(kEventHistoryDepth).transient_local();
@@ -387,69 +154,66 @@ DynamicRecorder::DynamicRecorder(const rclcpp::NodeOptions & options)
   // waiting up to a full tick for the first publication.
   pub_status_ = create_publisher<RecorderStatus>(
     "~/status", rclcpp::QoS(1).transient_local());
-  if (status_publish_period_s > 0.0) {
+  if (config_.status_publish_period_s > 0.0) {
     status_timer_ = create_wall_timer(
-      std::chrono::duration<double>(status_publish_period_s),
+      std::chrono::duration<double>(config_.status_publish_period_s),
       [this]() {publish_status();},
       service_callback_group_);
   }
 
-  if (messages_lost_report_period_s > 0.0) {
+  if (config_.messages_lost_report_period_s > 0.0) {
     messages_lost_timer_ = create_wall_timer(
-      std::chrono::duration<double>(messages_lost_report_period_s),
+      std::chrono::duration<double>(config_.messages_lost_report_period_s),
       [this]() {
+        const auto losses = losses_.drain();
+        if (losses.empty()) {
+          return;  // Topics with no losses are not reported, matching the upstream contract.
+        }
         MessagesLostEvent event;
         event.node_name = get_fully_qualified_name();
-        {
-          std::lock_guard<std::mutex> lock(messages_lost_mutex_);
-          if (messages_lost_since_last_event_.empty()) {
-            return;  // Topics with no losses are not reported, matching the upstream contract.
-          }
-          for (const auto & [topic_name, counts] : messages_lost_since_last_event_) {
-            decltype(event.messages_lost_statistics)::value_type stat;
-            stat.topic_name = topic_name;
-            stat.messages_lost_in_transport = counts.in_transport;
-            stat.messages_lost_in_recorder = counts.in_recorder;
-            event.messages_lost_statistics.push_back(stat);
-          }
-          messages_lost_since_last_event_.clear();
+        for (const auto & loss : losses) {
+          decltype(event.messages_lost_statistics)::value_type stat;
+          stat.topic_name = loss.topic;
+          stat.messages_lost_in_transport = loss.in_transport;
+          stat.messages_lost_in_recorder = loss.in_recorder;
+          event.messages_lost_statistics.push_back(stat);
         }
         pub_messages_lost_->publish(event);
       },
       service_callback_group_);
   }
 
-  if (low_disk_check_enabled || bag_size_check_enabled) {
+  if (config_.low_disk_check_enabled() || config_.bag_size_check_enabled()) {
     // Both guards on one tick. If both trip at once the first stops the recording and the second
     // finds it already stopped, so at most one event is written.
     storage_check_timer_ = create_wall_timer(
-      std::chrono::duration<double>(storage_check_period_s),
+      std::chrono::duration<double>(config_.storage_check_period_s),
       [this]() {check_free_space(); check_bag_size();},
       service_callback_group_);
   }
-  if (low_disk_check_enabled) {
+  if (config_.low_disk_check_enabled()) {
     RCLCPP_INFO(get_logger(),
       "Disk guard armed: stopping if free space falls below %llu bytes or %.1f%% of the "
       "filesystem, checked every %.1fs",
-      static_cast<unsigned long long>(min_free_space_),
-      min_free_space_percent_,
-      storage_check_period_s);
+      static_cast<unsigned long long>(config_.min_free_space),
+      config_.min_free_space_percent,
+      config_.storage_check_period_s);
   }
-  if (bag_size_check_enabled) {
+  if (config_.bag_size_check_enabled()) {
     RCLCPP_INFO(get_logger(),
       "Bag size guard armed: stopping if the bag grows past %llu bytes, checked every %.1fs",
-      static_cast<unsigned long long>(max_bag_size_),
-      storage_check_period_s);
+      static_cast<unsigned long long>(config_.max_bag_size),
+      config_.storage_check_period_s);
   }
 
   // Before the initial subscriptions, so a bag started with start_paused opens with the reason
   // its head is empty rather than with channels that appear to fail immediately.
   emit_initial_pause_state();
 
-  if (!initial_topics.empty()) {
+  if (!config_.initial_topics.empty()) {
     std::vector<std::string> subscribed;
     std::vector<std::string> unavailable;
-    subscribe_batch(initial_topics, {}, subscribed, unavailable);
+    subscribe_batch(config_.initial_topics, {}, subscribed, unavailable);
     for (const auto & topic : unavailable) {
       RCLCPP_WARN(get_logger(), "Initial topic '%s' unavailable at startup", topic.c_str());
     }
@@ -471,12 +235,8 @@ void DynamicRecorder::silence(Subscription & subscription)
 
 void DynamicRecorder::stop()
 {
-  {
-    std::lock_guard<std::mutex> lock(writer_mutex_);
-    if (!recording_) {
-      return;
-    }
-    recording_ = false;
+  if (!bag_.close()) {
+    return;
   }
   {
     // Disable callbacks before dropping the handles, so callbacks already queued in the executor
@@ -491,11 +251,7 @@ void DynamicRecorder::stop()
     std::sort(topics_at_stop_.begin(), topics_at_stop_.end());
     subscriptions_.clear();
   }
-  {
-    std::lock_guard<std::mutex> lock(writer_mutex_);
-    writer_->close();
-  }
-  clear_scheduled();
+  scheduler_->clear();
   RCLCPP_INFO(get_logger(), "Recording stopped, bag closed.");
   publish_status();
 }
@@ -576,60 +332,29 @@ bool DynamicRecorder::subscribe_topic(
       topic_name.c_str(), offered.c_str(), describe(qos).c_str());
   }
 
-  {
-    std::lock_guard<std::mutex> lock(writer_mutex_);
-    if (!recording_) {
-      return false;
-    }
-    const auto known = known_channels_.find(topic_name);
-    if (known != known_channels_.end() && known->second != topic_type) {
-      // The bag already has a channel for this topic under a different type. Writing the new
-      // type into it would silently corrupt the recording -- a publisher restarted with a
-      // changed type is the realistic way to get here. Refuse instead.
-      last_failure_reason_ = "'" + topic_name + "' is already in this bag as '" + known->second +
-        "'; it now publishes '" + topic_type + "'. Start a new bag to record the new type.";
-      RCLCPP_ERROR(get_logger(), "%s", last_failure_reason_.c_str());
-      return false;
-    }
-    if (known == known_channels_.end()) {
-      std::vector<rclcpp::QoS> offered_qos_profiles;
-      offered_qos_profiles.reserve(endpoints.size());
-      for (const auto & endpoint : endpoints) {
-        offered_qos_profiles.push_back(endpoint.qos_profile());
-      }
-      const rosbag2_storage::TopicMetadata topic_metadata{
-        0u,
-        topic_name,
-        topic_type,
-        serialization_format_,
-        offered_qos_profiles,
-        rosbag2_transport::type_description_hash_for_topic(endpoints),
-      };
-      // Resolves the message definition internally; this is the expensive call (~300-470ms for a
-      // type with nested members), which is why known_channels_ guards it.
-      try {
-        writer_->create_topic(topic_metadata);
-      } catch (const std::exception & e) {
-        last_failure_reason_ = "could not create a channel for '" + topic_name + "': " + e.what();
-        RCLCPP_ERROR(get_logger(), "%s", last_failure_reason_.c_str());
-        return false;
-      }
-      known_channels_.emplace(topic_name, topic_type);
-    }
+  std::vector<rclcpp::QoS> offered_qos_profiles;
+  offered_qos_profiles.reserve(endpoints.size());
+  for (const auto & endpoint : endpoints) {
+    offered_qos_profiles.push_back(endpoint.qos_profile());
+  }
+  const auto channel_error = bag_.ensure_channel({
+      0u, topic_name, topic_type, config_.serialization_format, offered_qos_profiles,
+      rosbag2_transport::type_description_hash_for_topic(endpoints)});
+  if (!channel_error.empty()) {
+    last_failure_reason_ = channel_error;
+    RCLCPP_ERROR(get_logger(), "%s", last_failure_reason_.c_str());
+    return false;
   }
 
   rclcpp::SubscriptionOptions subscription_options;
   subscription_options.event_callbacks.message_lost_callback =
     [this, topic_name](const rclcpp::QOSMessageLostInfo & info) {
-      messages_lost_in_transport_.fetch_add(info.total_count_change);
-      std::lock_guard<std::mutex> lock(messages_lost_mutex_);
-      messages_lost_since_last_event_[topic_name].in_transport += info.total_count_change;
+      losses_.note_transport_loss(topic_name, info.total_count_change);
     };
   auto enabled = std::make_shared<std::atomic<bool>>(true);
   // Co-owned by the callback and the subscription entry; the map dies when the subscription does,
   // so a dropped-and-readded topic starts from a clean sequence position.
-  auto last_publication_seq =
-    std::make_shared<std::unordered_map<std::string, uint64_t>>();
+  auto last_publication_seq = std::make_shared<LossAccounting::SequenceMap>();
   auto callback =
     [this, topic_name, topic_type, enabled, last_publication_seq](
     std::shared_ptr<const rclcpp::SerializedMessage> message, const rclcpp::MessageInfo & info)
@@ -662,44 +387,30 @@ bool DynamicRecorder::subscribe_topic(
       const auto & rmw_info = info.get_rmw_message_info();
       const auto sequence = rmw_info.publication_sequence_number;
       if (sequence != RMW_MESSAGE_INFO_SEQUENCE_NUMBER_UNSUPPORTED) {
-        sequence_numbers_available_.store(true, std::memory_order_relaxed);
-        // Per publisher, not per topic: two publishers on one topic have unrelated counters.
-        const std::string publisher_key(
-          reinterpret_cast<const char *>(rmw_info.publisher_gid.data), RMW_GID_STORAGE_SIZE);
-        auto & per_publisher = *last_publication_seq;
-        const auto previous = per_publisher.find(publisher_key);
-        if (previous != per_publisher.end() && sequence > previous->second + 1) {
-          messages_missed_.fetch_add(
-            sequence - previous->second - 1, std::memory_order_relaxed);
-        }
-        per_publisher[publisher_key] = sequence;
+        losses_.note_sequence(
+          *last_publication_seq,
+          std::string(reinterpret_cast<const char *>(rmw_info.publisher_gid.data),
+            RMW_GID_STORAGE_SIZE),
+          sequence);
       }
 
       // Before the pause gate, so a scheduled resume takes effect for this very message rather
       // than the next one, and before the writer lock, since firing takes that lock itself.
-      check_scheduled(topic_name, send_timestamp, recv_timestamp);
+      const auto fired = scheduler_->fired(topic_name, send_timestamp, recv_timestamp);
+      if (fired.resume) {
+        RCLCPP_INFO(get_logger(), "Scheduled resume reached on '%s'", topic_name.c_str());
+        resume("schedule:resume");
+      }
+      if (fired.split) {
+        RCLCPP_INFO(get_logger(), "Scheduled split reached on '%s'", topic_name.c_str());
+        split_bagfile();
+      }
 
       // Checked before taking the lock: while paused this is the whole cost of a message.
       if (paused_.load()) {
         return;
       }
-      std::lock_guard<std::mutex> lock(writer_mutex_);
-      if (!recording_) {
-        return;
-      }
-      try {
-        writer_->write(message, topic_name, topic_type, recv_timestamp, send_timestamp);
-        messages_written_.fetch_add(1, std::memory_order_relaxed);
-      } catch (const std::exception & e) {
-        // A full disk used to take the whole node down and with it the rest of the recording.
-        // Count it, say so at a rate that cannot itself become the problem, and keep going: the
-        // remaining topics and any later recovery are worth more than a clean death.
-        write_errors_.fetch_add(1, std::memory_order_relaxed);
-        RCLCPP_ERROR_THROTTLE(get_logger(), *get_clock(), 5000,
-          "Failed to write a message on '%s': %s (%lu write errors so far)",
-          topic_name.c_str(), e.what(),
-          static_cast<unsigned long>(write_errors_.load(std::memory_order_relaxed)));
-      }
+      bag_.write(message, topic_name, topic_type, recv_timestamp, send_timestamp);
     };
 
   rclcpp::GenericSubscription::SharedPtr subscription;
@@ -742,18 +453,11 @@ bool DynamicRecorder::unsubscribe_topic(const std::string & topic_name)
   }
   RCLCPP_INFO(get_logger(), "Unsubscribed '%s'", topic_name.c_str());
 
-  // Emitted outside subscriptions_mutex_: emitting takes writer_mutex_, and keeping the two
+  // Emitted outside subscriptions_mutex_: emitting takes the bag's lock, and keeping the two
   // uncrossed here means there is no lock-ordering cycle with subscribe_topic().
-  std::string topic_type;
-  {
-    std::lock_guard<std::mutex> lock(writer_mutex_);
-    const auto known = known_channels_.find(topic_name);
-    if (known != known_channels_.end()) {
-      topic_type = known->second;
-    }
-  }
   emit_subscription_change(
-    topic_name, topic_type, SubscriptionChangeEvent::UNSUBSCRIBED, current_reason_);
+    topic_name, bag_.channel_type(topic_name).value_or(""),
+    SubscriptionChangeEvent::UNSUBSCRIBED, current_reason_);
   return true;
 }
 
@@ -1028,16 +732,15 @@ void DynamicRecorder::handle_get_subscribed_topics(
   response->topics = subscribed_topics();
 }
 
-void DynamicRecorder::setup_writer_events()
+Bag::EventCallbacks DynamicRecorder::writer_event_callbacks()
 {
-  rosbag2_cpp::bag_events::WriterEventCallbacks callbacks;
+  Bag::EventCallbacks callbacks;
   callbacks.write_split_callback =
     [this](rosbag2_cpp::bag_events::BagSplitInfo & info) {
       WriteSplitEvent event;
       event.closed_file = info.closed_file;
       event.opened_file = info.opened_file;
       event.node_name = get_fully_qualified_name();
-      bag_splits_.fetch_add(1, std::memory_order_relaxed);
       if (pub_write_split_) {
         pub_write_split_->publish(event);
       }
@@ -1052,17 +755,15 @@ void DynamicRecorder::setup_writer_events()
 #if ROSBAG2_DYNAMIC_RECORDER_HAS_WRITER_MESSAGES_LOST
   callbacks.messages_lost_callback =
     [this](const std::vector<rosbag2_cpp::bag_events::MessagesLostInfo> & infos) {
-      std::lock_guard<std::mutex> lock(messages_lost_mutex_);
       for (const auto & info : infos) {
-        messages_lost_since_last_event_[info.topic_name].in_recorder += info.num_messages_lost;
-        messages_lost_in_recorder_.fetch_add(info.num_messages_lost);
+        losses_.note_recorder_loss(info.topic_name, info.num_messages_lost);
       }
     };
 #else
   // Jazzy and Kilted writers do not report their losses, so messages_lost_in_recorder stays 0
   // there: unknown, not zero, and the docs say so.
 #endif
-  writer_->add_event_callbacks(callbacks);
+  return callbacks;
 }
 
 void DynamicRecorder::emit_subscription_change(
@@ -1075,7 +776,7 @@ void DynamicRecorder::emit_subscription_change(
   event.action = action;
   event.reason = reason;
   // In the bag too: a channel that stops mid-bag is otherwise indistinguishable from lost data.
-  emit_event(pub_subscription_change_, record_subscription_events_, event);
+  emit_event(pub_subscription_change_, config_.record_subscription_events, event);
 }
 
 void DynamicRecorder::emit_pause_event(uint8_t action, const std::string & reason)
@@ -1086,7 +787,7 @@ void DynamicRecorder::emit_pause_event(uint8_t action, const std::string & reaso
   // A pause leaves a hole in every topic at once, which is exactly what a crash, a network fault
   // or the environmental rosbag2 stall (~1.2s across every topic, roughly every 31.2s) also look
   // like. Without the in-bag copy the bag cannot tell them apart.
-  emit_event(pub_pause_, record_pause_events_, event);
+  emit_event(pub_pause_, config_.record_pause_events, event);
 }
 
 void DynamicRecorder::emit_initial_pause_state()
@@ -1101,54 +802,53 @@ void DynamicRecorder::check_free_space()
   if (!is_recording()) {
     return;
   }
-  const SpaceInfo space = filesystem_space(uri_);
-  const auto threshold = breached_min_free_space(space, min_free_space_, min_free_space_percent_);
-  if (!threshold) {
+  const auto low = storage_guard_->low_disk(bag_.uri());
+  if (!low) {
     return;
   }
   RCLCPP_ERROR(get_logger(),
     "Free space on the bag's filesystem is %llu bytes, below the %llu byte minimum; stopping "
     "recording to leave the disk usable for the system",
-    static_cast<unsigned long long>(space.free_bytes),
-    static_cast<unsigned long long>(*threshold));
+    static_cast<unsigned long long>(low->space.free_bytes),
+    static_cast<unsigned long long>(low->threshold));
   LowDiskEvent event;
   event.action = LowDiskEvent::STOPPED;
-  event.free_space_bytes = space.free_bytes;
-  event.total_space_bytes = space.total_bytes;
-  event.min_free_space = min_free_space_;
-  event.min_free_space_percent = min_free_space_percent_;
+  event.free_space_bytes = low->space.free_bytes;
+  event.total_space_bytes = low->space.total_bytes;
+  event.min_free_space = config_.min_free_space;
+  event.min_free_space_percent = config_.min_free_space_percent;
   event.reason = "timer";
   // Emit, then stop: the event is written into the bag by emit, and stop() closes it. Reversed,
   // the explanation would be outside the recording it explains. Writing it costs a little of the
   // space the guard is preserving, which is exactly why the minimum is above zero; if the write
-  // still fails, write_event_to_bag counts it and the stop proceeds.
-  emit_event(pub_low_disk_, record_low_disk_events_, event);
+  // still fails, the bag counts it and the stop proceeds.
+  emit_event(pub_low_disk_, config_.record_low_disk_events, event);
   stopped_for_low_disk_.store(true);
   stop();
 }
 
 void DynamicRecorder::check_bag_size()
 {
-  if (max_bag_size_ == 0 || !is_recording()) {
+  if (!is_recording()) {
     return;
   }
-  const uint64_t size = measure_bag_size();
-  if (size <= max_bag_size_) {
+  const auto big = storage_guard_->bag_too_big(bag_.uri());
+  if (!big) {
     return;
   }
   RCLCPP_ERROR(get_logger(),
     "The bag is %llu bytes on disk, past the %llu byte limit; stopping recording",
-    static_cast<unsigned long long>(size),
-    static_cast<unsigned long long>(max_bag_size_));
+    static_cast<unsigned long long>(big->bag_size),
+    static_cast<unsigned long long>(config_.max_bag_size));
   BagSizeLimitEvent event;
   event.action = BagSizeLimitEvent::STOPPED;
-  event.bag_size_bytes = size;
-  event.max_bag_size = max_bag_size_;
+  event.bag_size_bytes = big->bag_size;
+  event.max_bag_size = config_.max_bag_size;
   event.reason = "timer";
   // Same order as the disk guard: the event goes into the bag, then stop() closes it. It lands a
   // few hundred bytes past a limit that is already exceeded, but the limit caps the recording,
   // not the disk; the disk guard is what stands between the bag and a full filesystem.
-  emit_event(pub_bag_size_limit_, record_bag_size_limit_events_, event);
+  emit_event(pub_bag_size_limit_, config_.record_bag_size_limit_events, event);
   stopped_for_max_bag_size_.store(true);
   stop();
 }
@@ -1171,45 +871,12 @@ void DynamicRecorder::emit_event(
   static const rclcpp::Serialization<EventT> serialization;
   rclcpp::SerializedMessage serialized;
   serialization.serialize_message(&event, &serialized);
-  write_event_to_bag(
-    pub->get_topic_name(),
-    rosidl_generator_traits::name<EventT>(),
-    std::make_shared<const rclcpp::SerializedMessage>(std::move(serialized)),
-    event.stamp);
-}
-
-void DynamicRecorder::write_event_to_bag(
-  const std::string & event_topic, const std::string & event_type,
-  std::shared_ptr<const rclcpp::SerializedMessage> serialized,
-  const builtin_interfaces::msg::Time & stamp)
-{
-  std::lock_guard<std::mutex> lock(writer_mutex_);
-  if (!recording_) {
-    return;
-  }
-  if (known_channels_.count(event_topic) == 0) {
-    try {
-      const rosbag2_storage::TopicMetadata metadata{
-        0u, event_topic, event_type, serialization_format_, {}, ""};
-      writer_->create_topic(metadata);
-    } catch (const std::exception & e) {
-      RCLCPP_ERROR(get_logger(), "Could not create the event channel '%s': %s",
-        event_topic.c_str(), e.what());
-      return;
-    }
-    known_channels_.emplace(event_topic, event_type);
-  }
-  const auto stamp_ns = to_nanoseconds(stamp);
   // Deliberately not gated on paused_: a topic change while paused still has to be explicable,
   // and an event explaining a pause obviously cannot be suppressed by that same pause.
-  try {
-    writer_->write(serialized, event_topic, event_type, stamp_ns, stamp_ns);
-    messages_written_.fetch_add(1, std::memory_order_relaxed);
-  } catch (const std::exception & e) {
-    write_errors_.fetch_add(1, std::memory_order_relaxed);
-    RCLCPP_ERROR(get_logger(), "Could not record an event on '%s': %s",
-      event_topic.c_str(), e.what());
-  }
+  bag_.write_event(
+    pub->get_topic_name(), rosidl_generator_traits::name<EventT>(),
+    std::make_shared<const rclcpp::SerializedMessage>(std::move(serialized)),
+    to_nanoseconds(event.stamp));
 }
 
 void DynamicRecorder::pause(const std::string & reason)
@@ -1240,41 +907,22 @@ bool DynamicRecorder::is_paused() const
 
 bool DynamicRecorder::split_bagfile()
 {
-  std::lock_guard<std::mutex> lock(writer_mutex_);
-  if (!recording_) {
-    return false;
-  }
-  try {
-    writer_->split_bagfile();
-  } catch (const std::exception & e) {
-    RCLCPP_ERROR(get_logger(), "Failed to split the bag: %s", e.what());
-    return false;
-  }
-  return true;
+  return bag_.split();
 }
 
 bool DynamicRecorder::take_snapshot()
 {
-  std::lock_guard<std::mutex> lock(writer_mutex_);
-  if (!recording_) {
-    return false;
-  }
-  try {
-    return writer_->take_snapshot();
-  } catch (const std::exception & e) {
-    RCLCPP_ERROR(get_logger(), "Snapshot failed: %s", e.what());
-    return false;
-  }
+  return bag_.take_snapshot();
 }
 
 uint64_t DynamicRecorder::messages_lost_in_transport() const
 {
-  return messages_lost_in_transport_.load();
+  return losses_.totals().lost_in_transport;
 }
 
 uint64_t DynamicRecorder::messages_lost_in_recorder() const
 {
-  return messages_lost_in_recorder_.load();
+  return losses_.totals().lost_in_recorder;
 }
 
 uint64_t DynamicRecorder::total_messages_lost() const
@@ -1284,7 +932,7 @@ uint64_t DynamicRecorder::total_messages_lost() const
 
 uint64_t DynamicRecorder::total_messages_missed() const
 {
-  return messages_missed_.load(std::memory_order_relaxed);
+  return losses_.totals().missed;
 }
 
 void DynamicRecorder::handle_pause(
@@ -1305,42 +953,14 @@ void DynamicRecorder::handle_resume(
     response->error_string = "recorder is stopped; call ~/record to open a new bag first";
     return;
   }
-
-  const auto at_ns = to_nanoseconds(request->resume_time);
-  if (at_ns == 0) {
-    resume("service:resume");
-    response->return_code = Resume::Response::RETURN_CODE_SUCCESS;
-    return;
-  }
-
-  const auto invalid = validate_schedule(
-    request->resume_mode, request->tracking_topic_name,
-    Resume::Response::RETURN_CODE_INVALID_RESUME_MODE,
-    Resume::Response::RETURN_CODE_INVALID_TRACKING_TOPIC);
-  if (invalid != 0) {
-    response->return_code = invalid;
-    response->error_string = invalid == Resume::Response::RETURN_CODE_INVALID_RESUME_MODE
-      ? "resume_mode must be 0 (node time), 1 (publish time) or 2 (receive time)"
-      : "tracking_topic_name '" + request->tracking_topic_name + "' is not being recorded";
-    return;
-  }
-
-  if (request->resume_mode == kModeNodeTime) {
-    const auto delta = at_ns - now().nanoseconds();
-    if (delta <= 0) {
-      resume("service:resume");
-    } else {
-      // A timer rather than the message path: node-time schedules must fire on a silent robot.
-      arm_timer(
-        resume_timer_, std::chrono::nanoseconds(delta),
-        [this]() {resume("schedule:resume");});
-    }
-  } else {
-    std::lock_guard<std::mutex> lock(scheduled_mutex_);
-    scheduled_resume_ = {true, at_ns, request->resume_mode, request->tracking_topic_name};
-    schedule_pending_.store(true, std::memory_order_relaxed);
-  }
-  response->return_code = Resume::Response::RETURN_CODE_SUCCESS;
+  const auto outcome = schedule_or_run(
+    Scheduler::Kind::Resume, request->resume_time, request->resume_mode,
+    request->tracking_topic_name,
+    {Resume::Response::RETURN_CODE_SUCCESS, Resume::Response::RETURN_CODE_INVALID_RESUME_MODE,
+      Resume::Response::RETURN_CODE_INVALID_TRACKING_TOPIC, Resume::Response::RETURN_CODE_SUCCESS},
+    [this](const std::string & reason) {resume(reason); return true;});
+  response->return_code = outcome.code;
+  response->error_string = outcome.error;
 }
 
 void DynamicRecorder::handle_toggle_paused(
@@ -1370,45 +990,61 @@ void DynamicRecorder::handle_split_bagfile(
     response->error_string = "not recording";
     return;
   }
+  const auto outcome = schedule_or_run(
+    Scheduler::Kind::Split, request->split_time, request->split_mode,
+    request->tracking_topic_name,
+    {SplitBagfile::Response::RETURN_CODE_SUCCESS,
+      SplitBagfile::Response::RETURN_CODE_INVALID_SPLIT_MODE,
+      SplitBagfile::Response::RETURN_CODE_INVALID_TRACKING_TOPIC,
+      SplitBagfile::Response::RETURN_CODE_SPLIT_FAILED},
+    [this](const std::string &) {return split_bagfile();});
+  response->return_code = outcome.code;
+  response->error_string = outcome.error;
+}
 
-  const auto at_ns = to_nanoseconds(request->split_time);
+DynamicRecorder::ScheduleOutcome DynamicRecorder::schedule_or_run(
+  Scheduler::Kind kind, const builtin_interfaces::msg::Time & at, int32_t mode,
+  const std::string & tracking_topic, const ScheduleCodes & codes,
+  std::function<bool(const std::string &)> action)
+{
+  const std::string verb = kind == Scheduler::Kind::Resume ? "resume" : "split";
+  const auto run_now = [&]() -> ScheduleOutcome {
+      if (!action("service:" + verb)) {
+        return {codes.failed, "the writer could not " + verb + " the bag"};
+      }
+      return {codes.success, ""};
+    };
+  const auto at_ns = to_nanoseconds(at);
   if (at_ns == 0) {
-    if (!split_bagfile()) {
-      response->return_code = SplitBagfile::Response::RETURN_CODE_SPLIT_FAILED;
-      response->error_string = "the writer could not split the bag";
-      return;
+    return run_now();
+  }
+  const auto parsed = Scheduler::mode_from(mode);
+  if (!parsed) {
+    return {codes.invalid_mode,
+      verb + "_mode must be 0 (node time), 1 (publish time) or 2 (receive time)"};
+  }
+  if (!tracking_topic.empty()) {
+    // A schedule keyed to a topic nobody is recording would wait forever, so refuse it rather
+    // than accept a request that cannot come true.
+    const auto current = subscribed_topics();
+    if (std::find(current.begin(), current.end(), tracking_topic) == current.end()) {
+      return {codes.invalid_topic,
+        "tracking_topic_name '" + tracking_topic + "' is not being recorded"};
     }
-    response->return_code = SplitBagfile::Response::RETURN_CODE_SUCCESS;
-    return;
   }
-
-  const auto invalid = validate_schedule(
-    request->split_mode, request->tracking_topic_name,
-    SplitBagfile::Response::RETURN_CODE_INVALID_SPLIT_MODE,
-    SplitBagfile::Response::RETURN_CODE_INVALID_TRACKING_TOPIC);
-  if (invalid != 0) {
-    response->return_code = invalid;
-    response->error_string = invalid == SplitBagfile::Response::RETURN_CODE_INVALID_SPLIT_MODE
-      ? "split_mode must be 0 (node time), 1 (publish time) or 2 (receive time)"
-      : "tracking_topic_name '" + request->tracking_topic_name + "' is not being recorded";
-    return;
+  if (*parsed != Scheduler::Mode::NodeTime) {
+    scheduler_->schedule_at_message_time(kind, at_ns, *parsed, tracking_topic);
+    return {codes.success, ""};
   }
-
-  if (request->split_mode == kModeNodeTime) {
-    const auto delta = at_ns - now().nanoseconds();
-    if (delta <= 0) {
-      split_bagfile();
-    } else {
-      arm_timer(
-        split_timer_, std::chrono::nanoseconds(delta),
-        [this]() {split_bagfile();});
-    }
-  } else {
-    std::lock_guard<std::mutex> lock(scheduled_mutex_);
-    scheduled_split_ = {true, at_ns, request->split_mode, request->tracking_topic_name};
-    schedule_pending_.store(true, std::memory_order_relaxed);
+  const auto delta = at_ns - now().nanoseconds();
+  if (delta <= 0) {
+    return run_now();
   }
-  response->return_code = SplitBagfile::Response::RETURN_CODE_SUCCESS;
+  // A timer rather than the message path: node-time schedules must fire on a silent robot.
+  scheduler_->arm(
+    kind, std::chrono::nanoseconds(delta),
+    [action, verb]() {action("schedule:" + verb);});
+  return {codes.success, ""};
 }
 
 void DynamicRecorder::handle_snapshot(
@@ -1418,7 +1054,7 @@ void DynamicRecorder::handle_snapshot(
   response->success = take_snapshot();
   // take_snapshot() already logged the reason; only add the hint a caller cannot infer from it,
   // and only when snapshot mode is off, since with it on that line would be the duplicate.
-  if (!response->success && !snapshot_mode_) {
+  if (!response->success && !config_.snapshot_mode) {
     RCLCPP_WARN(get_logger(),
       "Snapshot failed because snapshot_mode is disabled -- set the snapshot_mode parameter");
   }
@@ -1427,12 +1063,7 @@ void DynamicRecorder::handle_snapshot(
 void DynamicRecorder::handle_stop(
   const std::shared_ptr<Stop::Request> /*request*/, std::shared_ptr<Stop::Response> response)
 {
-  bool was_recording;
-  {
-    std::lock_guard<std::mutex> lock(writer_mutex_);
-    was_recording = recording_;
-  }
-  if (!was_recording) {
+  if (!is_recording()) {
     response->return_code = kReturnError;
     response->error_string = "recording is already stopped";
     return;
@@ -1440,48 +1071,6 @@ void DynamicRecorder::handle_stop(
   current_reason_ = "service:stop";
   stop();
   response->return_code = kReturnSuccess;
-}
-
-uint64_t DynamicRecorder::bag_size_bytes() const
-{
-  {
-    std::lock_guard<std::mutex> lock(size_cache_mutex_);
-    const auto now = std::chrono::steady_clock::now();
-    if (bag_size_cached_at_.time_since_epoch().count() != 0 &&
-      now - bag_size_cached_at_ < kBagSizeCacheTtl)
-    {
-      return cached_bag_size_;
-    }
-  }
-  return measure_bag_size();
-}
-
-uint64_t DynamicRecorder::measure_bag_size() const
-{
-  namespace fs = std::filesystem;
-  std::error_code ec;
-  const fs::path dir(uri_);
-  uint64_t total = 0;
-  if (fs::is_directory(dir, ec)) {
-    // Not recursive: a rosbag2 bag directory is flat -- some number of storage files plus
-    // metadata.yaml -- so descending buys nothing and costs a walk that grows with split count.
-    for (fs::directory_iterator it(dir, ec), end; it != end; it.increment(ec)) {
-      if (ec) {
-        break;  // Report what we counted rather than failing the whole status call.
-      }
-      if (it->is_regular_file(ec)) {
-        const auto size = it->file_size(ec);
-        if (!ec) {
-          total += size;
-        }
-      }
-    }
-  }
-
-  std::lock_guard<std::mutex> lock(size_cache_mutex_);
-  cached_bag_size_ = total;
-  bag_size_cached_at_ = std::chrono::steady_clock::now();
-  return total;
 }
 
 void DynamicRecorder::handle_get_status(
@@ -1494,37 +1083,34 @@ void DynamicRecorder::handle_get_status(
 DynamicRecorder::RecorderStatus DynamicRecorder::build_status() const
 {
   RecorderStatus status;
-  status.storage_id = storage_id_;
-  status.snapshot_mode = snapshot_mode_;
+  status.storage_id = config_.storage.storage_id;
+  status.snapshot_mode = config_.snapshot_mode;
   status.paused = paused_.load();
-  {
-    // record() writes all three under this lock; read them the same way.
-    std::lock_guard<std::mutex> lock(writer_mutex_);
-    status.recording = recording_;
-    status.uri = uri_;
-    status.recording_started = recording_started_;
-  }
-  status.elapsed_seconds = (now() - status.recording_started).seconds();
+  const auto bag = bag_.info();
+  status.recording = bag.open;
+  status.uri = bag.uri;
+  status.recording_started = bag.opened_at;
+  status.elapsed_seconds = (now() - bag.opened_at).seconds();
   // One lock/copy/sort of the subscription map, reused for both fields.
   status.subscribed_topics = subscribed_topics();
   status.active_profile = active_profile_for(status.subscribed_topics);
-  status.messages_written = messages_written_.load(std::memory_order_relaxed);
-  status.messages_lost_in_transport = messages_lost_in_transport();
-  status.messages_lost_in_recorder = messages_lost_in_recorder();
+  status.messages_written = bag.messages_written;
+  const auto losses = losses_.totals();
+  status.messages_lost_in_transport = losses.lost_in_transport;
+  status.messages_lost_in_recorder = losses.lost_in_recorder;
   status.messages_lost = status.messages_lost_in_transport + status.messages_lost_in_recorder;
-  status.write_errors = write_errors_.load(std::memory_order_relaxed);
-  status.messages_missed = messages_missed_.load(std::memory_order_relaxed);
-  status.sequence_numbers_available =
-    sequence_numbers_available_.load(std::memory_order_relaxed);
-  status.bag_splits = bag_splits_.load(std::memory_order_relaxed);
-  status.bag_size_bytes = bag_size_bytes();
-  const SpaceInfo space = filesystem_space(status.uri);
+  status.write_errors = bag.write_errors;
+  status.messages_missed = losses.missed;
+  status.sequence_numbers_available = losses.sequence_numbers_available;
+  status.bag_splits = bag.splits;
+  status.bag_size_bytes = storage_guard_->bag_size(status.uri);
+  const auto space = StorageGuard::filesystem_space(status.uri);
   status.free_space_bytes = space.free_bytes;
   status.total_space_bytes = space.total_bytes;
-  status.min_free_space = min_free_space_;
-  status.min_free_space_percent = min_free_space_percent_;
+  status.min_free_space = config_.min_free_space;
+  status.min_free_space_percent = config_.min_free_space_percent;
   status.stopped_for_low_disk = stopped_for_low_disk_.load();
-  status.max_bag_size = max_bag_size_;
+  status.max_bag_size = config_.max_bag_size;
   status.stopped_for_max_bag_size = stopped_for_max_bag_size_.load();
   return status;
 }
@@ -1545,100 +1131,70 @@ void DynamicRecorder::publish_status()
 
 bool DynamicRecorder::is_recording() const
 {
-  std::lock_guard<std::mutex> lock(writer_mutex_);
-  return recording_;
+  return bag_.is_open();
 }
 
 bool DynamicRecorder::record(const std::string & uri)
 {
-  std::vector<std::string> restore;
-  {
-    std::lock_guard<std::mutex> lock(writer_mutex_);
-    if (recording_) {
-      return false;
-    }
-
-    if (!uri.empty()) {
-      storage_options_.uri = uri;
-    }
-    // rosbag2 refuses to open over an existing bag directory, and stop()/record() on the same
-    // configured path would hit exactly that. Pick the next free suffix, as upstream's recorder
-    // does, rather than failing or overwriting someone's data.
-    namespace fs = std::filesystem;
-    std::error_code ec;
-    if (fs::exists(storage_options_.uri, ec)) {
-      const fs::path base(storage_options_.uri);
-      bool found = false;
-      for (size_t i = 1; i < kMaxBagPathSuffix && !found; ++i) {
-        fs::path candidate = base;
-        candidate += "(" + std::to_string(i) + ")";
-        if (!fs::exists(candidate, ec)) {
-          storage_options_.uri = candidate.generic_string();
-          found = true;
-        }
-      }
-      if (!found) {
-        last_failure_reason_ = "no free bag path near '" + base.generic_string() +
-          "'; " + std::to_string(kMaxBagPathSuffix) + " suffixed directories already exist";
-        RCLCPP_ERROR(get_logger(), "%s", last_failure_reason_.c_str());
-        return false;
+  if (bag_.is_open()) {
+    return false;
+  }
+  if (!uri.empty()) {
+    storage_options_.uri = uri;
+  }
+  // rosbag2 refuses to open over an existing bag directory, and stop()/record() on the same
+  // configured path would hit exactly that. Pick the next free suffix, as upstream's recorder
+  // does, rather than failing or overwriting someone's data.
+  namespace fs = std::filesystem;
+  std::error_code ec;
+  if (fs::exists(storage_options_.uri, ec)) {
+    const fs::path base(storage_options_.uri);
+    bool found = false;
+    for (size_t i = 1; i < kMaxBagPathSuffix && !found; ++i) {
+      fs::path candidate = base;
+      candidate += "(" + std::to_string(i) + ")";
+      if (!fs::exists(candidate, ec)) {
+        storage_options_.uri = candidate.generic_string();
+        found = true;
       }
     }
-    uri_ = storage_options_.uri;
-
-    // A new bag has no channels. Publisher sequence positions from the previous bag would read as
-    // loss the first time each topic is seen again, but stop() already dropped every subscription
-    // and with it each per-subscription sequence map, so the restored ones start clean.
-    known_channels_.clear();
-    messages_written_.store(0, std::memory_order_relaxed);
-    messages_missed_.store(0, std::memory_order_relaxed);
-    messages_lost_in_transport_.store(0);
-    messages_lost_in_recorder_.store(0);
-    bag_splits_.store(0, std::memory_order_relaxed);
-    {
-      // Per-topic losses owed to the previous bag must not be published as the next bag's first
-      // MessagesLostEvent. Totals above are reset, so leaving this would misattribute them.
-      std::lock_guard<std::mutex> lost_lock(messages_lost_mutex_);
-      messages_lost_since_last_event_.clear();
-    }
-
-    auto writer = std::make_unique<rosbag2_cpp::Writer>();
-    try {
-      writer->open(storage_options_, converter_options_);
-    } catch (const std::exception & e) {
-      // Bad path, no permission, or the suffix search below exhausted its range. Report it
-      // rather than terminating from inside a service callback, and leave the recorder stopped
-      // but alive so the caller can fix the path and try again.
-      last_failure_reason_ = std::string("could not open '") + storage_options_.uri + "': " +
-        e.what();
+    if (!found) {
+      last_failure_reason_ = "no free bag path near '" + base.generic_string() +
+        "'; " + std::to_string(kMaxBagPathSuffix) + " suffixed directories already exist";
       RCLCPP_ERROR(get_logger(), "%s", last_failure_reason_.c_str());
       return false;
     }
-    writer_ = std::move(writer);
-    write_errors_.store(0, std::memory_order_relaxed);
-    // Only now is this a fresh episode: clear last time's self-inflicted stop. Clearing before
-    // the open would erase the reason the recorder is stopped when the open itself fails.
-    stopped_for_low_disk_.store(false);
-    stopped_for_max_bag_size_.store(false);
-    {
-      // The new bag is empty; a cached size from the previous one would be actively wrong.
-      std::lock_guard<std::mutex> size_lock(size_cache_mutex_);
-      cached_bag_size_ = 0;
-      bag_size_cached_at_ = {};
-    }
-    recording_ = true;
-    recording_started_ = now();
-    restore = topics_at_stop_;
-    topics_at_stop_.clear();
   }
 
-  setup_writer_events();
-  RCLCPP_INFO(get_logger(), "Recording to '%s'", uri_.c_str());
+  // Publisher sequence positions from the previous bag would read as loss the first time each
+  // topic is seen again, but stop() already dropped every subscription and with it each
+  // per-subscription sequence map, so the restored ones start clean.
+  losses_.reset();
+  const auto open_error =
+    bag_.open(storage_options_, config_.converter, writer_event_callbacks(), now());
+  if (!open_error.empty()) {
+    // Reported rather than thrown from inside a service callback, and the recorder stays
+    // stopped but alive so the caller can fix the path and try again.
+    last_failure_reason_ = open_error;
+    RCLCPP_ERROR(get_logger(), "%s", last_failure_reason_.c_str());
+    return false;
+  }
+  // Only now is this a fresh episode: clear last time's self-inflicted stop. Clearing before
+  // the open would erase the reason the recorder is stopped when the open itself fails.
+  stopped_for_low_disk_.store(false);
+  stopped_for_max_bag_size_.store(false);
+  storage_guard_->reset();
+  RCLCPP_INFO(get_logger(), "Recording to '%s'", storage_options_.uri.c_str());
 
   // ~/record does not clear the paused flag, so a bag reopened while paused would otherwise begin
   // with an unexplained hole exactly like the one this event exists to account for.
   emit_initial_pause_state();
 
+  std::vector<std::string> restore;
+  {
+    std::lock_guard<std::mutex> lock(subscriptions_mutex_);
+    restore.swap(topics_at_stop_);
+  }
   if (!restore.empty()) {
     current_reason_ = "service:record";
     std::vector<std::string> subscribed;
@@ -1665,18 +1221,9 @@ void DynamicRecorder::handle_record(
   const auto at_ns = to_nanoseconds(request->start_time);
   const auto delta = at_ns == 0 ? 0 : at_ns - now().nanoseconds();
   if (delta > 0) {
-    {
-      std::lock_guard<std::mutex> lock(scheduled_mutex_);
-      scheduled_record_uri_ = request->uri;
-    }
-    arm_timer(
-      record_timer_, std::chrono::nanoseconds(delta),
-      [this]() {
-        std::string uri;
-        {
-          std::lock_guard<std::mutex> lock(scheduled_mutex_);
-          uri = scheduled_record_uri_;
-        }
+    scheduler_->arm(
+      Scheduler::Kind::Record, std::chrono::nanoseconds(delta),
+      [this, uri = request->uri]() {
         if (!record(uri)) {
           RCLCPP_ERROR(get_logger(), "Scheduled recording failed to start: %s",
             last_failure_reason_.c_str());
@@ -1702,7 +1249,7 @@ std::string DynamicRecorder::active_profile() const
 
 std::string DynamicRecorder::active_profile_for(const std::vector<std::string> & current) const
 {
-  for (const auto & [name, topics] : profiles_) {
+  for (const auto & [name, topics] : config_.profiles) {
     if (topics == current) {
       return name;
     }
@@ -1715,9 +1262,9 @@ bool DynamicRecorder::set_profile(
   std::vector<std::string> & unsubscribed_out, std::vector<std::string> & unavailable_out)
 {
   const auto profile = std::find_if(
-    profiles_.begin(), profiles_.end(),
+    config_.profiles.begin(), config_.profiles.end(),
     [&name](const auto & entry) {return entry.first == name;});
-  if (profile == profiles_.end()) {
+  if (profile == config_.profiles.end()) {
     return false;
   }
 
@@ -1749,7 +1296,7 @@ void DynamicRecorder::handle_set_profile(
   {
     response->return_code = kReturnError;
     std::string known;
-    for (const auto & [name, _] : profiles_) {
+    for (const auto & [name, _] : config_.profiles) {
       known += (known.empty() ? "" : ", ") + name;
     }
     response->error_string = "no profile named '" + request->name + "'" +
@@ -1765,115 +1312,14 @@ void DynamicRecorder::handle_get_profiles(
   const std::shared_ptr<GetProfiles::Request> /*request*/,
   std::shared_ptr<GetProfiles::Response> response)
 {
-  response->profiles.reserve(profiles_.size());
-  for (const auto & [name, topics] : profiles_) {
+  response->profiles.reserve(config_.profiles.size());
+  for (const auto & [name, topics] : config_.profiles) {
     Profile profile;
     profile.name = name;
     profile.topics = topics;
     response->profiles.push_back(profile);
   }
   response->active_profile = active_profile();
-}
-
-int32_t DynamicRecorder::validate_schedule(
-  int32_t mode, const std::string & tracking_topic,
-  int32_t invalid_mode_code, int32_t invalid_topic_code) const
-{
-  if (mode != kModeNodeTime && mode != kModePublishTime && mode != kModeReceiveTime) {
-    return invalid_mode_code;
-  }
-  if (!tracking_topic.empty()) {
-    // A schedule keyed to a topic nobody is recording would wait forever, so refuse it rather
-    // than accept a request that cannot come true.
-    const auto current = subscribed_topics();
-    if (std::find(current.begin(), current.end(), tracking_topic) == current.end()) {
-      return invalid_topic_code;
-    }
-  }
-  return 0;
-}
-
-void DynamicRecorder::check_scheduled(
-  const std::string & topic_name,
-  rcutils_time_point_value_t send_timestamp,
-  rcutils_time_point_value_t recv_timestamp)
-{
-  // The common case is no message-time schedule at all: one relaxed load instead of a lock, two
-  // lambda calls and a pair of timestamp comparisons on every message.
-  if (!schedule_pending_.load(std::memory_order_relaxed)) {
-    return;
-  }
-
-  bool fire_resume = false;
-  bool fire_split = false;
-  {
-    std::lock_guard<std::mutex> lock(scheduled_mutex_);
-    const auto satisfied = [&](ScheduledAction & action) {
-        if (!action.active || action.mode == kModeNodeTime) {
-          return false;
-        }
-        if (!action.tracking_topic.empty() && action.tracking_topic != topic_name) {
-          return false;
-        }
-        const auto stamp =
-          action.mode == kModePublishTime ? send_timestamp : recv_timestamp;
-        // A zero stamp means the middleware did not supply one; comparing against it would fire
-        // immediately and for the wrong reason.
-        if (stamp == 0 || stamp < action.at_ns) {
-          return false;
-        }
-        action.active = false;
-        return true;
-      };
-    fire_resume = satisfied(scheduled_resume_);
-    fire_split = satisfied(scheduled_split_);
-    // Keep the fast path honest: only a message-time schedule still active warrants entering here.
-    schedule_pending_.store(
-      scheduled_resume_.active || scheduled_split_.active, std::memory_order_relaxed);
-  }
-
-  // Outside the lock: both take the writer lock, which this callback is about to take as well.
-  if (fire_resume) {
-    RCLCPP_INFO(get_logger(), "Scheduled resume reached on '%s'", topic_name.c_str());
-    resume("schedule:resume");
-  }
-  if (fire_split) {
-    RCLCPP_INFO(get_logger(), "Scheduled split reached on '%s'", topic_name.c_str());
-    split_bagfile();
-  }
-}
-
-void DynamicRecorder::clear_scheduled()
-{
-  {
-    std::lock_guard<std::mutex> lock(scheduled_mutex_);
-    scheduled_resume_ = {};
-    scheduled_split_ = {};
-    schedule_pending_.store(false, std::memory_order_relaxed);
-  }
-  if (resume_timer_) {
-    resume_timer_->cancel();
-  }
-  if (split_timer_) {
-    split_timer_->cancel();
-  }
-}
-
-void DynamicRecorder::arm_timer(
-  rclcpp::TimerBase::SharedPtr & slot, std::chrono::nanoseconds delta,
-  std::function<void()> action)
-{
-  // Only the newest schedule of a given kind should be live, so retire the previous one first.
-  if (slot) {
-    slot->cancel();
-  }
-  slot = create_wall_timer(
-    delta,
-    [&slot, action = std::move(action)]() {
-      slot->cancel();  // One shot.
-      action();
-    },
-    service_callback_group_);
 }
 
 }  // namespace rosbag2_dynamic_recorder
