@@ -12,25 +12,13 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from dynrec.services import IsPaused, TogglePaused
-from rosbag2_dynamic_recorder_cli.api import add_recorder_arguments, with_recorder
-from rosbag2_dynamic_recorder_cli.verb import VerbExtension
+from rosbag2_dynamic_recorder_cli.verb import RecorderVerb
 
 
-class ToggleVerb(VerbExtension):
+class ToggleVerb(RecorderVerb):
     """Flip between paused and recording."""
 
-    def add_arguments(self, parser, cli_name):
-        add_recorder_arguments(parser)
-
-    def main(self, *, args):
-        def body(recorder):
-            recorder.call(TogglePaused, 'toggle_paused')
-            # TogglePaused has an empty response, and a toggle whose result you have to guess is
-            # not much use, so ask. The second round trip is the price of being able to print
-            # what actually happened rather than what was requested.
-            paused = recorder.call(IsPaused, 'is_paused').paused
-            print('paused' if paused else 'recording')
-            return 0
-
-        return with_recorder(args, body)
+    def run(self, recorder, args):
+        # dynrec's toggle asks the recorder for the resulting state, because a toggle whose
+        # result you have to guess is not much use.
+        print('paused' if recorder.toggle() else 'recording')

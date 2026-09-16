@@ -12,25 +12,14 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from rosbag2_dynamic_recorder_cli.api import add_recorder_arguments, with_recorder
-from rosbag2_dynamic_recorder_cli.verb import VerbExtension
-
-from rosbag2_dynamic_recorder_interfaces.srv import GetSubscribedTopics
+from rosbag2_dynamic_recorder_cli.verb import RecorderVerb
 
 
-class TopicsVerb(VerbExtension):
+class TopicsVerb(RecorderVerb):
     """List the topics being recorded, one per line."""
 
-    def add_arguments(self, parser, cli_name):
-        add_recorder_arguments(parser)
-
-    def main(self, *, args):
-        def body(recorder):
-            # Bare names and nothing else, so this pipes into xargs without any parsing. `status`
-            # is where the decorated version lives.
-            response = recorder.call(GetSubscribedTopics, 'get_subscribed_topics')
-            for topic in response.topics:
-                print(topic)
-            return 0
-
-        return with_recorder(args, body)
+    def run(self, recorder, args):
+        # Bare names and nothing else, so this pipes into xargs without any parsing. `status` is
+        # where the decorated version lives.
+        for topic in recorder.topics():
+            print(topic)

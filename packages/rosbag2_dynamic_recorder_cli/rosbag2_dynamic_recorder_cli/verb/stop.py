@@ -12,22 +12,15 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from dynrec.services import Stop
-from rosbag2_dynamic_recorder_cli.api import add_recorder_arguments, report, with_recorder
-from rosbag2_dynamic_recorder_cli.verb import VerbExtension
+from rosbag2_dynamic_recorder_cli.verb import RecorderVerb
 
 
-class StopVerb(VerbExtension):
+class StopVerb(RecorderVerb):
     """Close the bag. The node keeps running; 'record' opens a new one."""
 
-    def add_arguments(self, parser, cli_name):
-        add_recorder_arguments(parser)
-
-    def main(self, *, args):
-        def body(recorder):
-            response = recorder.call(Stop, 'stop')
-            # Any queued schedule is cleared by the recorder here, so a split or resume set up
-            # before this cannot fire against whatever bag comes next.
-            return report(response, 'stopped; the bag is closed')
-
-        return with_recorder(args, body)
+    def run(self, recorder, args):
+        # dynrec raises CallFailed when the recorder refuses (already stopped), and any queued
+        # schedule is cleared by the recorder here, so a split or resume set up before cannot
+        # fire against whatever bag comes next.
+        recorder.stop()
+        print('stopped; the bag is closed')

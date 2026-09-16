@@ -12,107 +12,17 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Turning recorder state into text, and command-line time into a ROS timestamp.
+"""Turning recorder state into text, and defining the scheduling arguments.
 
 Pure functions with no ROS dependency beyond the message fields they read, so the rules below can
 be tested directly. The rule worth protecting is the same one the browser UI encodes: a number the
 recorder cannot vouch for is reported as unknown, never as a convenient zero.
+
+The time dialect and the mode mapping are dynrec.schedule's -- the verbs hand `--at` straight to
+`dynrec.Recorder`, so there is no second copy here to drift from it.
 """
 
-import re
-import time
-from datetime import datetime, timedelta
-
-from rosbag2_dynamic_recorder_cli.api import RecorderError
-
-#: Mode names accepted by --mode, mapping to the constants shared by Resume and SplitBagfile.
-TIME_MODES = {
-    'node': 0,
-    'publish': 1,
-    'receive': 2,
-}
-
-_RELATIVE = re.compile(r'^\+(\d+(?:\.\d+)?)([smh]?)$')
-_UNIT_SECONDS = {'': 1.0, 's': 1.0, 'm': 60.0, 'h': 3600.0}
-
-
-def parse_time(value, now=None):
-    """Parse a --at argument into (sec, nanosec) for a builtin_interfaces/Time.
-
-    Three forms, in the order they are worth reaching for over SSH:
-
-      +30s, +5m, +1h   relative to now
-      14:05            today at that local wall-clock time, tomorrow if it has already passed
-      2026-09-03T14:05 an ISO 8601 instant, local time unless it carries an offset
-      1756900000.5     raw epoch seconds, for scripts
-
-    The relative and wall-clock forms are resolved against *this* machine's clock, while the
-    recorder compares against its own node clock. On one machine, or a clock-synced fleet, those
-    agree; across a robot whose clock has drifted they do not, which is why the absolute forms
-    exist.
-    """
-    if now is None:
-        now = time.time()
-    text = value.strip()
-
-    relative = _RELATIVE.match(text)
-    if relative:
-        amount, unit = relative.groups()
-        return _split(now + float(amount) * _UNIT_SECONDS[unit])
-
-    # A bare number is epoch seconds. Checked before the date parsing so "1756900000" is not read
-    # as a year.
-    try:
-        return _split(float(text))
-    except ValueError:
-        pass
-
-    if re.match(r'^\d{1,2}:\d{2}(:\d{2})?$', text):
-        return _split(_next_wall_clock(text, now))
-
-    try:
-        parsed = datetime.fromisoformat(text)
-    except ValueError:
-        raise RecorderError(
-            "cannot read '{}' as a time. Try +30s, 14:05, 2026-09-03T14:05, or epoch "
-            'seconds.'.format(value))
-    if parsed.tzinfo is None:
-        parsed = parsed.astimezone()
-    return _split(parsed.timestamp())
-
-
-def _next_wall_clock(text, now):
-    """Today at `text`, or tomorrow if that moment has already gone by."""
-    fields = [int(part) for part in text.split(':')]
-    while len(fields) < 3:
-        fields.append(0)
-    today = datetime.fromtimestamp(now).replace(
-        hour=fields[0], minute=fields[1], second=fields[2], microsecond=0)
-    if today.timestamp() > now:
-        return today.timestamp()
-    # A day added in calendar terms rather than as 86400 seconds, so "05:00" the night before a
-    # daylight-saving change still means five in the morning.
-    return (today + timedelta(days=1)).timestamp()
-
-
-def _split(seconds):
-    whole = int(seconds)
-    nanoseconds = int(round((seconds - whole) * 1e9))
-    # A fraction within half a nanosecond of the next second rounds to 1e9, which is not a legal
-    # nanosec field. Rare, but it would surface as an opaque message-assignment error.
-    if nanoseconds >= 1_000_000_000:
-        whole += 1
-        nanoseconds -= 1_000_000_000
-    return whole, nanoseconds
-
-
-def parse_mode(value):
-    """Map a --mode name to its numeric constant."""
-    try:
-        return TIME_MODES[value]
-    except KeyError:
-        raise RecorderError(
-            "unknown mode '{}'. Choose one of: {}".format(value, ', '.join(sorted(TIME_MODES))))
+from dynrec.schedule import TIME_MODES
 
 
 def add_schedule_arguments(parser, noun):
@@ -132,24 +42,6 @@ def add_schedule_arguments(parser, noun):
              'the recorder is subscribed to. Default: any recorded topic')
 
 
-def apply_schedule(request, args, time_field, mode_field):
-    """Fill a scheduled request's time, mode and tracking topic from the parsed arguments.
-
-    Leaving the timestamp at zero is how these services are told to act immediately, and the
-    recorder reads a zero stamp as absent rather than as time zero -- so the untouched request is
-    already the "do it now" request.
-    """
-    request.tracking_topic_name = args.topic
-    setattr(request, mode_field, parse_mode(args.mode))
-    if args.at is None:
-        return None
-    seconds, nanoseconds = parse_time(args.at)
-    stamp = getattr(request, time_field)
-    stamp.sec = seconds
-    stamp.nanosec = nanoseconds
-    return seconds + nanoseconds / 1e9
-
-
 def format_duration(seconds):
     """Elapsed time, at the precision a person reading a terminal actually wants."""
     seconds = max(0.0, float(seconds))
@@ -166,12 +58,12 @@ def format_duration(seconds):
 def format_bytes(count):
     """Binary-prefixed size. 0 stays "0 B" -- see the caveat where this is used."""
     size = float(count)
-    for unit in ('B', 'KiB', 'MiB', 'GiB', 'TiB'):
-        if size < 1024.0 or unit == 'TiB':
-            return '{:.0f} {}'.format(size, unit) if unit == 'B' else '{:.1f} {}'.format(
-                size, unit)
-        size /= 1024.0
-    return '{:.1f} TiB'.format(size)
+    unit = 'B'
+    for larger in ('KiB', 'MiB', 'GiB', 'TiB'):
+        if size < 1024.0:
+            break
+        size, unit = size / 1024.0, larger
+    return '{:.0f} {}'.format(size, unit) if unit == 'B' else '{:.1f} {}'.format(size, unit)
 
 
 def format_topic_group(label, topics):
@@ -188,6 +80,11 @@ def format_topic_group(label, topics):
 def state_word(status):
     """One word for what the recorder is doing, plus any qualifier worth seeing."""
     if not status.recording:
+        # A stop the recorder chose is the one a reader most needs explained.
+        if status.stopped_for_low_disk:
+            return 'stopped (free space on the bag filesystem fell below the minimum)'
+        if status.stopped_for_max_bag_size:
+            return 'stopped (the bag reached max_bag_size)'
         return 'stopped'
     word = 'paused' if status.paused else 'recording'
     if status.snapshot_mode:
@@ -195,38 +92,31 @@ def state_word(status):
     return word
 
 
-def status_dict(status):
-    """The status as plain data, for --json.
+def free_space_text(status):
+    """Free space on the bag filesystem and the floor the guard enforces, or unknown."""
+    if not status.total_space_bytes:
+        return 'unknown (the bag filesystem could not be read)'
+    text = '{} of {}'.format(
+        format_bytes(status.free_space_bytes), format_bytes(status.total_space_bytes))
+    floors = []
+    if status.min_free_space:
+        floors.append(format_bytes(status.min_free_space))
+    if status.min_free_space_percent:
+        floors.append('{:g}%'.format(status.min_free_space_percent))
+    if floors:
+        text += ' (recording stops below {})'.format(' or '.join(floors))
+    return text
 
-    `messages_missed` is None rather than 0 when the middleware supplies no publication sequence
-    numbers, because the recorder genuinely cannot tell. A consumer that wants a number can then
-    decide what to do about not having one, instead of being handed a zero that means "no idea".
+
+def format_status(status):
+    """The human-readable status block for a :class:`dynrec.Status`, as a list of lines.
+
+    `messages_missed` is None when the middleware supplies no publication sequence numbers,
+    because the recorder genuinely cannot tell; that is rendered as unknown rather than as a zero
+    that means "no idea".
     """
-    sequence_ok = bool(status.sequence_numbers_available)
-    return {
-        'uri': status.uri,
-        'storage_id': status.storage_id,
-        'recording': bool(status.recording),
-        'paused': bool(status.paused),
-        'snapshot_mode': bool(status.snapshot_mode),
-        'elapsed_seconds': status.elapsed_seconds,
-        'subscribed_topics': list(status.subscribed_topics),
-        'active_profile': status.active_profile,
-        'messages_written': status.messages_written,
-        'messages_missed': status.messages_missed if sequence_ok else None,
-        'messages_lost_in_transport': status.messages_lost_in_transport,
-        'messages_lost_in_recorder': status.messages_lost_in_recorder,
-        'messages_lost_reported': status.messages_lost,
-        'write_errors': status.write_errors,
-        'bag_splits': status.bag_splits,
-        'bag_size_bytes': status.bag_size_bytes,
-    }
-
-
-def format_status(status, recorder_name):
-    """The human-readable status block, as a list of lines."""
     rows = [
-        ('recorder', recorder_name),
+        ('recorder', status.recorder),
         ('state', state_word(status)),
         ('bag', '{} [{}]'.format(status.uri, status.storage_id)),
         ('elapsed', format_duration(status.elapsed_seconds)),
@@ -236,10 +126,10 @@ def format_status(status, recorder_name):
     lines = ['{:<14}{}'.format(label + ':', value) for label, value in rows]
     lines.extend('{:<14}{}'.format('', topic) for topic in status.subscribed_topics)
 
-    if status.sequence_numbers_available:
-        missed = str(status.messages_missed)
-    else:
+    if status.messages_missed is None:
         missed = 'unknown (this middleware supplies no publication sequence numbers)'
+    else:
+        missed = str(status.messages_missed)
 
     counters = [
         ('written', str(status.messages_written)),
@@ -250,8 +140,11 @@ def format_status(status, recorder_name):
             status.messages_lost_in_recorder)),
         ('write errors', str(status.write_errors)),
         ('splits', str(status.bag_splits)),
-        ('on disk', '{} (flushed; the writer caches, so this lags what is captured)'.format(
-            format_bytes(status.bag_size_bytes))),
+        ('on disk', '{}{} (flushed; the writer caches, so this lags what is captured)'.format(
+            format_bytes(status.bag_size_bytes),
+            ' of {} allowed'.format(format_bytes(status.max_bag_size))
+            if status.max_bag_size else '')),
+        ('free space', free_space_text(status)),
     ]
     lines.extend('{:<14}{}'.format(label + ':', value) for label, value in counters)
     return lines

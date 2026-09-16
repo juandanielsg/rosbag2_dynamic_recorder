@@ -53,7 +53,12 @@ from rosbag2_dynamic_recorder_interfaces.srv import (
 from rclpy.serialization import deserialize_message
 from rosbag2_py import ConverterOptions, SequentialReader, StorageOptions
 
-from rosbag2_dynamic_recorder_interfaces.msg import PauseEvent, SubscriptionChangeEvent
+from rosbag2_dynamic_recorder_interfaces.msg import (
+    BagSizeLimitEvent,
+    LowDiskEvent,
+    PauseEvent,
+    SubscriptionChangeEvent,
+)
 # The recorder offers Record, Resume, SplitBagfile and Stop under the stock rosbag2_interfaces
 # type where the installed definition matches the rosbag2 0.34 shape and under the copy in
 # rosbag2_dynamic_recorder_interfaces where it does not (Jazzy, Kilted). dynrec.services encodes
@@ -80,6 +85,8 @@ EVENT_TYPE = "rosbag2_dynamic_recorder_interfaces/msg/SubscriptionChangeEvent"
 SUBSCRIBED, UNSUBSCRIBED = 0, 1
 PAUSE_EVENT_TYPE = "rosbag2_dynamic_recorder_interfaces/msg/PauseEvent"
 PAUSED, RESUMED = 0, 1
+LOW_DISK_EVENT_TYPE = "rosbag2_dynamic_recorder_interfaces/msg/LowDiskEvent"
+BAG_SIZE_LIMIT_EVENT_TYPE = "rosbag2_dynamic_recorder_interfaces/msg/BagSizeLimitEvent"
 
 # In practice the untouched topic's largest gap across two set_topics calls measures 0.05s --
 # exactly one publish interval at 20Hz, i.e. no interruption at all. The bound is loose only
@@ -102,6 +109,8 @@ NODE = "/rosbag2_dynamic_recorder"
 TOPICS = ["/rdr_test/alpha", "/rdr_test/beta", "/rdr_test/gamma"]
 EVENT_TOPIC = f"{NODE}/events/subscription_change"
 PAUSE_TOPIC = f"{NODE}/events/pause"
+LOW_DISK_TOPIC = f"{NODE}/events/low_disk"
+BAG_SIZE_LIMIT_TOPIC = f"{NODE}/events/bag_size_limit"
 
 
 class Harness(Node):
@@ -112,6 +121,9 @@ class Harness(Node):
         qos = QoSProfile(depth=10, reliability=ReliabilityPolicy.RELIABLE)
         self._pubs = [self.create_publisher(String, t, qos) for t in TOPICS]
         self._seq = 0
+        # Appended to every message. Empty by default; the bag-size tests enlarge it so the bag
+        # grows on disk in seconds rather than minutes.
+        self.payload = ""
         self.create_timer(0.05, self._tick)
         # Not `self._clients`: rclpy.node.Node already uses that name for its own
         # list, and shadowing it breaks create_client().
@@ -120,7 +132,7 @@ class Harness(Node):
     def _tick(self):
         self._seq += 1
         for pub in self._pubs:
-            pub.publish(String(data=f"m{self._seq}"))
+            pub.publish(String(data=f"m{self._seq}{self.payload}"))
 
     def client(self, srv_type, service):
         key = (srv_type, service)
@@ -221,12 +233,133 @@ def unexplained_recorder():
 
 
 @pytest.fixture()
+def low_disk_recorder():
+    """A recorder whose free-space guard fires at the first check, so it stops itself.
+
+    The minimum is larger than any real disk, so the condition is certain without having to fill
+    one. A percentage probe is not used because a fresh tmpfs can legitimately be ~100% free.
+    """
+    harness, bag, cleanup = _start_recorder((
+        "-p", "min_free_space:=9223372036854775807",
+        "-p", "storage_check_period:=0.2"))
+    try:
+        yield harness, bag
+    finally:
+        cleanup()
+
+
+def test_low_free_space_stops_recording(low_disk_recorder):
+    """The guard protects the filesystem, not the bag: a full disk also stops logging and DDS."""
+    harness, _ = low_disk_recorder
+    harness.spin_for(1.0)
+    status = harness.status()
+    assert status.recording is False, "the disk guard did not stop the recording"
+    assert status.stopped_for_low_disk is True
+    assert status.free_space_bytes > 0, "the status should report the measured free space"
+    assert status.total_space_bytes >= status.free_space_bytes
+    assert status.min_free_space > 0
+
+
+def test_low_disk_stop_is_explained_in_the_bag(low_disk_recorder):
+    """A recording that just ends is indistinguishable from a crash, so the bag must say why."""
+    harness, bag = low_disk_recorder
+    harness.spin_for(1.0)
+    events = read_low_disk_events(bag)
+    assert events, "no LowDiskEvent was recorded; the stop is unexplained"
+    _offset, event = events[-1]
+    assert event.action == 0, f"expected STOPPED, got {event.action}"
+    assert event.free_space_bytes > 0
+    assert event.total_space_bytes >= event.free_space_bytes
+    assert event.reason, "the event should say what caused it"
+    assert event.node_name, "the event should name its sender"
+
+
+def test_a_recorder_without_the_guard_keeps_recording_and_reports_space(recorder):
+    """Non-vacuous: with no minimum set, nothing stops, and free space is still reported."""
+    harness, _ = recorder
+    harness.call(SubscribeTopics, "subscribe_topics", topics=[TOPICS[0]])
+    harness.spin_for(1.0)
+    status = harness.status()
+    assert status.recording is True
+    assert status.stopped_for_low_disk is False
+    assert status.min_free_space == 0
+    assert status.free_space_bytes > 0
+    assert status.stopped_for_max_bag_size is False
+    assert status.max_bag_size == 0
+
+
+#: Well under one MCAP chunk (~768 KiB), so the first chunk flushed to disk is already past it.
+BAG_SIZE_LIMIT = 200_000
+
+
+@pytest.fixture()
+def size_limited_recorder():
+    """A recorder with a bag size cap, fed messages fat enough to reach it within seconds.
+
+    Size on disk is what the guard measures, and MCAP only writes a chunk once it holds ~768 KiB,
+    so the harness's usual few-byte strings would take minutes to register. 50 KB per message on
+    one topic at 20 Hz is ~1 MB/s: the first chunk lands within a second or two.
+    """
+    harness, bag, cleanup = _start_recorder((
+        "-p", f"max_bag_size:={BAG_SIZE_LIMIT}",
+        "-p", "storage_check_period:=0.2"))
+    try:
+        harness.payload = "x" * 50_000
+        harness.call(SubscribeTopics, "subscribe_topics", topics=[TOPICS[0]])
+        yield harness, bag
+    finally:
+        cleanup()
+
+
+def test_a_bag_past_its_size_limit_stops_recording(size_limited_recorder):
+    """The cap is on the recording, not the disk: it fires with plenty of free space left."""
+    harness, _ = size_limited_recorder
+    harness.spin_for(6.0)
+    status = harness.status()
+    assert status.recording is False, (
+        f"the size guard did not stop the recording at {status.bag_size_bytes} bytes")
+    assert status.stopped_for_max_bag_size is True
+    assert status.stopped_for_low_disk is False, "the wrong guard is being credited"
+    assert status.max_bag_size == BAG_SIZE_LIMIT
+    assert status.bag_size_bytes > BAG_SIZE_LIMIT, "stopped without the bag being over the limit"
+
+
+def test_a_size_limit_stop_is_explained_in_the_bag(size_limited_recorder):
+    """Same contract as the disk guard: the bag must say why it ended."""
+    harness, bag = size_limited_recorder
+    harness.spin_for(6.0)
+    assert harness.status().recording is False
+    events = read_bag_size_limit_events(bag)
+    assert events, "no BagSizeLimitEvent was recorded; the stop is unexplained"
+    _offset, event = events[-1]
+    assert event.action == 0, f"expected STOPPED, got {event.action}"
+    assert event.bag_size_bytes > BAG_SIZE_LIMIT
+    assert event.max_bag_size == BAG_SIZE_LIMIT
+    assert event.reason, "the event should say what caused it"
+    assert event.node_name, "the event should name its sender"
+
+
+def test_record_after_a_size_limit_stop_opens_a_fresh_bag_and_re_arms(size_limited_recorder):
+    """The cap is per bag, not per node: a new recording starts from zero and is capped again."""
+    harness, _ = size_limited_recorder
+    harness.spin_for(6.0)
+    assert harness.status().stopped_for_max_bag_size is True
+    harness.payload = ""  # So the second bag stays under the cap long enough to be observed.
+    assert harness.call(Record, "record").return_code == 0
+    status = harness.status()
+    assert status.recording is True
+    assert status.stopped_for_max_bag_size is False
+    assert status.max_bag_size == BAG_SIZE_LIMIT
+
+
+@pytest.fixture()
 def profiled_recorder():
     """A recorder configured with two deliberately overlapping profiles."""
     harness, bag, cleanup = _start_recorder((
-        "-p", "profile_names:=[small,large]",
+        "-p", "profile_names:=[small,large,ghost]",
         "-p", f"profiles.small:=[{TOPICS[0]}]",
         "-p", f"profiles.large:=[{TOPICS[0]},{TOPICS[1]}]",
+        "-p", "profiles.ghost:=[/rdr_test/nobody_publishes_this]",
     ))
     try:
         yield harness, bag
@@ -325,6 +458,21 @@ def test_set_topics_regex_replaces_the_selection(recorder):
     assert TOPICS[1] in response.unsubscribed_topics
 
 
+def test_set_topics_reports_total_failure(recorder):
+    """Regression: a set_topics whose every topic failed used to report success, so a caller
+    could not tell "all eight missing" from "all eight recorded" without parsing the lists."""
+    harness, _ = recorder
+    harness.call(SetTopics, "set_topics", topics=TOPICS[:2])
+
+    response = harness.call(
+        SetTopics, "set_topics", topics=["/rdr_test/nobody_publishes_this"])
+    assert response.return_code != 0, "an all-unavailable set_topics is a failure"
+    assert "/rdr_test/nobody_publishes_this" in response.unavailable_topics
+    # The old selection was dropped before the add failed, and the add did not land.
+    assert list(response.subscribed_topics) == []
+    assert not harness.status().subscribed_topics
+
+
 def test_unsubscribe_regex_matches_what_is_recorded_not_the_graph(recorder):
     """Only the recorded subset can be dropped, so that is the pool a pattern searches."""
     harness, _ = recorder
@@ -356,6 +504,16 @@ def test_stopped_recorder_refuses_with_the_real_reason(recorder):
     assert response.return_code != 0
     assert "stopped" in response.error_string.lower()
     assert not response.unavailable_topics, "the topics are fine; the recorder is not"
+
+
+def test_resume_is_refused_while_stopped(recorder):
+    """A resume against no open bag can only arm a timer for a recording that will not exist."""
+    harness, _ = recorder
+    assert harness.call(Stop, "stop").return_code == 0
+
+    response = harness.call(Resume, "resume")
+    assert response.return_code != 0, "resuming a stopped recorder should be refused"
+    assert "stopped" in response.error_string.lower()
 
 
 def test_second_stop_is_reported_not_silently_accepted(recorder):
@@ -433,6 +591,39 @@ def test_scheduled_split_produces_a_second_file(recorder):
 
     harness.spin_for(5.0)
     assert harness.status().bag_splits == 1, "the scheduled split did not fire"
+
+
+def test_rescheduling_replaces_the_pending_node_time_timer(recorder):
+    """A second node-time schedule must replace the first, not be cancelled by it.
+
+    Regression: the timer callback cancelled whichever timer the member currently pointed at, so a
+    superseded timer would cancel the live replacement and then, being a repeating timer, fire its
+    action again on every period.
+    """
+    harness, _ = recorder
+    from builtin_interfaces.msg import Time
+
+    harness.call(SubscribeTopics, "subscribe_topics", topics=[TOPICS[0]])
+    first = harness.get_clock().now().nanoseconds + 3_000_000_000
+    second = harness.get_clock().now().nanoseconds + 8_000_000_000
+    assert harness.call(
+        SplitBagfile, "split_bagfile",
+        split_time=Time(sec=first // 10**9, nanosec=first % 10**9),
+        split_mode=0).return_code == 0
+    assert harness.call(
+        SplitBagfile, "split_bagfile",
+        split_time=Time(sec=second // 10**9, nanosec=second % 10**9),
+        split_mode=0).return_code == 0
+
+    # Past the superseded first timer's deadline: it must not have fired.
+    harness.spin_for(5.0)
+    assert harness.status().bag_splits == 0, "the superseded schedule fired"
+
+    # The replacement fires once, and does not keep firing.
+    harness.spin_for(5.0)
+    assert harness.status().bag_splits == 1, "the replacement did not fire exactly once"
+    harness.spin_for(4.0)
+    assert harness.status().bag_splits == 1, "the timer fired more than once"
 
 
 def test_scheduled_record_starts_later(recorder):
@@ -537,6 +728,19 @@ def test_unknown_storage_preset_is_refused_at_startup():
         _start_recorder(("-p", "storage_preset_profile:=fastwrit"))
 
 
+def test_an_impossible_free_space_percentage_is_refused_at_startup():
+    """A percentage over 100 can never be satisfied, so it would stop every recording the instant
+    it started. Refusing it at startup says so instead of producing empty bags."""
+    with pytest.raises(AssertionError, match="exited early"):
+        _start_recorder(("-p", "min_free_space_percent:=150"))
+
+
+def test_a_negative_bag_size_limit_is_refused_at_startup():
+    """Rejected like the other byte counts rather than wrapping to an enormous unsigned limit."""
+    with pytest.raises(AssertionError, match="exited early"):
+        _start_recorder(("-p", "max_bag_size:=-1"))
+
+
 def read_bag(uri):
     """Return per-topic receive timestamps (seconds, bag-relative) and the recorded events."""
     reader = SequentialReader()
@@ -575,6 +779,29 @@ def read_pause_events(uri):
         every_stamp.append(stamp)
         if types.get(topic) == PAUSE_EVENT_TYPE:
             found.append((stamp, deserialize_message(data, PauseEvent)))
+
+    assert every_stamp, "the bag is empty"
+    origin = min(every_stamp)
+    return [((stamp - origin) / 1e9, event) for stamp, event in found]
+
+
+def read_low_disk_events(uri):
+    """LowDiskEvents in the bag, as (bag-relative seconds, event) pairs.
+
+    Same time origin as read_bag(), so the event's offset can be compared against the end of the
+    data it explains -- the two must coincide, or the bag does not actually say why it ended.
+    """
+    reader = SequentialReader()
+    reader.open(StorageOptions(uri=uri, storage_id="mcap"), ConverterOptions("cdr", "cdr"))
+    types = {t.name: t.type for t in reader.get_all_topics_and_types()}
+
+    every_stamp = []
+    found = []
+    while reader.has_next():
+        topic, data, stamp = reader.read_next()
+        every_stamp.append(stamp)
+        if types.get(topic) == LOW_DISK_EVENT_TYPE:
+            found.append((stamp, deserialize_message(data, LowDiskEvent)))
 
     assert every_stamp, "the bag is empty"
     origin = min(every_stamp)
@@ -816,7 +1043,7 @@ def test_profiles_are_offered_as_configured(profiled_recorder):
     harness, _ = profiled_recorder
     response = harness.call(GetProfiles, "get_profiles")
     names = [p.name for p in response.profiles]
-    assert names == ["small", "large"], "declaration order should be preserved for a UI to list"
+    assert names == ["small", "large", "ghost"], "declaration order should be preserved for a UI to list"
 
 
 def test_switching_profiles_does_not_touch_shared_topics(profiled_recorder):
@@ -870,6 +1097,18 @@ def test_unknown_profile_says_what_is_configured(profiled_recorder):
     assert "small" in response.error_string and "large" in response.error_string, (
         "the error should tell the caller what they could have asked for"
     )
+
+
+def test_profile_reports_total_failure(profiled_recorder):
+    """Mirror of the set_topics rule: a profile none of whose topics could be subscribed is a
+    failure the caller has to see, not a success with an empty list."""
+    harness, _ = profiled_recorder
+    harness.call(SetProfile, "set_profile", name="small")
+
+    response = harness.call(SetProfile, "set_profile", name="ghost")
+    assert response.return_code != 0, "an all-unavailable profile is a failure"
+    assert "/rdr_test/nobody_publishes_this" in response.unavailable_topics
+    assert list(response.subscribed_topics) == []
 
 
 def test_profiles_absent_when_none_configured(recorder):
@@ -933,3 +1172,23 @@ def test_status_reports_no_write_errors_on_a_healthy_run(recorder):
     harness.call(SubscribeTopics, "subscribe_topics", topics=[TOPICS[0]])
     harness.spin_for(2.0)
     assert harness.status().write_errors == 0
+
+
+def read_bag_size_limit_events(uri):
+    """BagSizeLimitEvents in the bag, as (bag-relative seconds, event) pairs. See
+    read_low_disk_events()."""
+    reader = SequentialReader()
+    reader.open(StorageOptions(uri=uri, storage_id="mcap"), ConverterOptions("cdr", "cdr"))
+    types = {t.name: t.type for t in reader.get_all_topics_and_types()}
+
+    every_stamp = []
+    found = []
+    while reader.has_next():
+        topic, data, stamp = reader.read_next()
+        every_stamp.append(stamp)
+        if types.get(topic) == BAG_SIZE_LIMIT_EVENT_TYPE:
+            found.append((stamp, deserialize_message(data, BagSizeLimitEvent)))
+
+    assert every_stamp, "the bag is empty"
+    origin = min(every_stamp)
+    return [((stamp - origin) / 1e9, event) for stamp, event in found]

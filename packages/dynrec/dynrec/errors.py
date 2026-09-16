@@ -60,12 +60,17 @@ class CallFailed(DynrecError):
 
     Carries the service's own `return_code` and `error_string`, because the recorder's message is
     almost always more specific than anything this library could say on its behalf.
+
+    Also carries the raw `response`, when there was one. A refusal can still leave useful data on
+    the response -- a `set_topics` that failed every topic still lists them in `unavailable_topics`
+    -- and a CLI that prints those before reporting the error needs them to survive the raise.
     """
 
-    def __init__(self, message, return_code=None, error_string=''):
+    def __init__(self, message, return_code=None, error_string='', response=None):
         super().__init__(message)
         self.return_code = return_code
         self.error_string = error_string
+        self.response = response
 
 
 class InvalidRequest(DynrecError, ValueError):

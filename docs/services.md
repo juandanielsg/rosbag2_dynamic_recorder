@@ -138,6 +138,20 @@ A few fields need reading carefully:
   non-zero value means the bag is incomplete, and the recorder kept running deliberately, since
   stopping would lose the rest of the recording too.
 
+`free_space_bytes`, `total_space_bytes`
+: Available and total bytes on the filesystem holding the bag, or 0 when either could not be
+  determined. `min_free_space` / `min_free_space_percent` are compared against the first, so a UI
+  can show how close the recorder is to stopping.
+
+`stopped_for_low_disk`
+: True when the recorder stopped itself because free space fell below the configured minimum,
+  rather than because of `~/stop`. Cleared when `~/record` opens a new bag.
+
+`max_bag_size`, `stopped_for_max_bag_size`
+: The configured cap on the bag directory in bytes (0 when unset), and whether the recorder stopped
+  itself for exceeding it. Compared against `bag_size_bytes`, so it inherits that field's caveat.
+  Cleared when `~/record` opens a new bag.
+
 The remaining fields are literal: `recording`, `paused`, `snapshot_mode`, `elapsed_seconds`,
 `recording_started`, `subscribed_topics`, `bag_splits` (times the file has rolled over) and
 `messages_written` (which counts the recorder's own event messages too).
@@ -152,14 +166,16 @@ profile's set and it reports that one, whatever command got you there.
 |---|---|---|
 | `~/events/subscription_change` | `SubscriptionChangeEvent` | also written into the bag |
 | `~/events/pause` | `PauseEvent` | also written into the bag |
+| `~/events/low_disk` | `LowDiskEvent` | also written into the bag |
+| `~/events/bag_size_limit` | `BagSizeLimitEvent` | also written into the bag |
 | `~/events/write_split` | `WriteSplitEvent` | |
 | `~/events/messages_lost` | `MessagesLostEvent` | stock on Rolling, a field-identical copy on Jazzy and Kilted |
 
-Writing the first two into the bag is what makes a gap legible: a gap mid-bag is otherwise
+Writing the first three into the bag is what makes a gap legible: a gap mid-bag is otherwise
 indistinguishable from a dropout, a crash or a network fault. The event records what changed, when and why, in-stream and
 timestamped, and it survives bag splitting.
 
-The two cover different shapes of gap, and you need both:
+The three cover different shapes of gap, and you need all of them:
 
 - `SubscriptionChangeEvent` explains a channel that stops: one topic goes sparse while the others
   carry on. Disable with `record_subscription_events:=false`.
@@ -167,6 +183,14 @@ The two cover different shapes of gap, and you need both:
   what a crash or a network fault looks like too. The stock `rosbag2_interfaces/srv/Pause` has an
   empty request and response and so can carry no explanation. Disable with
   `record_pause_events:=false`.
+- `LowDiskEvent` explains a recording the recorder ended itself: when `min_free_space` or
+  `min_free_space_percent` is set and free space falls below it, the recorder emits this, stops, and
+  closes the bag. Without it the bag would simply end, indistinguishable from a crash or a power
+  loss. Disable the in-bag copy with `record_low_disk_events:=false`.
+- `BagSizeLimitEvent` is the same explanation for the other guard: when `max_bag_size` is set and
+  the bag directory grows past it, across every split, the recorder emits this, stops, and closes
+  the bag. `max_bagfile_size` only rolls to a new file; this is the cap on the recording as a whole.
+  Disable the in-bag copy with `record_bag_size_limit_events:=false`.
 
 While paused no messages are written, but these events still are. An event suppressed by the pause
 it describes would leave the hole it exists to account for.
@@ -216,6 +240,12 @@ A worked example using the TurtleBot 4 simulator's topics ships at
 | `storage_config_uri` | *(empty)* | Storage plugin YAML, overlaid on the preset. |
 | `record_subscription_events` | `true` | Write subscription changes into the bag. |
 | `record_pause_events` | `true` | Write pauses and resumes into the bag. |
+| `record_low_disk_events` | `true` | Write a low-disk stop into the bag. |
+| `record_bag_size_limit_events` | `true` | Write a bag-size-limit stop into the bag. |
+| `min_free_space` | `0` | Stop recording below this many bytes free on the bag filesystem; `0` disables. |
+| `min_free_space_percent` | `0.0` | Same, as a percentage of the filesystem; `0.0` disables. The stricter applies. |
+| `max_bag_size` | `0` | Stop recording once the bag directory, across every split, exceeds this many bytes; `0` disables. |
+| `storage_check_period` | `1.0` | Seconds between free-space and bag-size checks when either limit is set. |
 | `messages_lost_report_period` | `5.0` | Seconds between `MessagesLostEvent`. `0` disables. |
 | `status_publish_period` | `1.0` | Seconds between `~/status` publications. |
 | `profile_names` | `[]` | Names of the declared profiles. |
@@ -232,10 +262,12 @@ history unseen — the recorder warns once at startup if you do that.
 
 These are node parameters. The launch files forward only some of them: `uri`, `storage_id`,
 `serialization_format`, `topics`, `start_paused`, `snapshot_mode`, the six storage settings,
-`record_subscription_events` and `messages_lost_report_period`. Set `record_pause_events`,
-`status_publish_period`, `profile_names` and the profiles themselves through `params_file` (or
-`-p name:=value` when running the node directly). The full argument list is in
-[Install](install.md#launch-arguments).
+`record_subscription_events`, `messages_lost_report_period`, `min_free_space`,
+`min_free_space_percent` and `max_bag_size`. Set `record_pause_events`, `record_low_disk_events`,
+`record_bag_size_limit_events`, `storage_check_period`, `status_publish_period`, `profile_names`
+and the profiles themselves
+through `params_file` (or `-p name:=value` when running the node directly). The full argument list
+is in [Install](install.md#launch-arguments).
 
 ## Calling them by hand
 

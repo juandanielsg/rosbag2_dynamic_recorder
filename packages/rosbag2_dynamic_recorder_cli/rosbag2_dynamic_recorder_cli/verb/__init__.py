@@ -14,6 +14,8 @@
 
 from ros2cli.plugin_system import PLUGIN_SYSTEM_VERSION, satisfies_version
 
+from rosbag2_dynamic_recorder_cli.api import add_recorder_arguments, with_recorder
+
 
 class VerbExtension:
     """
@@ -40,4 +42,21 @@ class VerbExtension:
         pass
 
     def main(self, *, args):
+        raise NotImplementedError()
+
+
+class RecorderVerb(VerbExtension):
+    """A verb that talks to one recorder.
+
+    Subclasses add their own arguments after `super().add_arguments()` and implement `run`. A
+    refusal raises out of `run`; `with_recorder` turns it into stderr and the exit code.
+    """
+
+    def add_arguments(self, parser, cli_name):
+        add_recorder_arguments(parser)
+
+    def main(self, *, args):
+        return with_recorder(args, lambda recorder: self.run(recorder, args))
+
+    def run(self, recorder, args):
         raise NotImplementedError()

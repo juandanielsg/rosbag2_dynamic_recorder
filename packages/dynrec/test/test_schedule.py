@@ -82,6 +82,12 @@ def test_an_unreadable_time_says_what_it_would_have_accepted():
         parse_time('next tuesday', NOW)
 
 
+def test_an_impossible_time_of_day_is_the_library_error_not_datetimes():
+    """'99:99' has the right shape and an out-of-range hour; the caller should see one error type."""
+    with pytest.raises(InvalidRequest, match='hour'):
+        parse_time('99:99', NOW)
+
+
 def test_a_fraction_that_rounds_up_stays_a_legal_timestamp():
     """1e9 is not a valid nanosec field, and the failure would surface as an opaque ROS error."""
     seconds, nanoseconds = parse_time(10.9999999999, NOW)

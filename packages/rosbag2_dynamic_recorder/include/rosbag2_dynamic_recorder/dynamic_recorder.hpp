@@ -17,8 +17,9 @@
 
 #include <atomic>
 #include <chrono>
-#include <map>
 #include <cstdint>
+#include <functional>
+#include <map>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -67,6 +68,8 @@
 #else
 #include "rosbag2_dynamic_recorder_interfaces/srv/stop.hpp"
 #endif
+#include "rosbag2_dynamic_recorder_interfaces/msg/low_disk_event.hpp"
+#include "rosbag2_dynamic_recorder_interfaces/msg/bag_size_limit_event.hpp"
 #include "rosbag2_dynamic_recorder_interfaces/msg/pause_event.hpp"
 #include "rosbag2_dynamic_recorder_interfaces/msg/profile.hpp"
 #include "rosbag2_dynamic_recorder_interfaces/msg/recorder_status.hpp"
@@ -194,6 +197,8 @@ private:
   using SubscriptionChangeEvent =
     rosbag2_dynamic_recorder_interfaces::msg::SubscriptionChangeEvent;
   using PauseEvent = rosbag2_dynamic_recorder_interfaces::msg::PauseEvent;
+  using LowDiskEvent = rosbag2_dynamic_recorder_interfaces::msg::LowDiskEvent;
+  using BagSizeLimitEvent = rosbag2_dynamic_recorder_interfaces::msg::BagSizeLimitEvent;
   using RecorderStatus = rosbag2_dynamic_recorder_interfaces::msg::RecorderStatus;
   using WriteSplitEvent = rosbag2_interfaces::msg::WriteSplitEvent;
 #if ROSBAG2_DYNAMIC_RECORDER_HAS_UPSTREAM_MESSAGES_LOST_EVENT
@@ -223,6 +228,10 @@ private:
   /// topic keeps its existing messages and becomes a sparse channel.
   /// \return false if the topic was not subscribed.
   bool unsubscribe_topic(const std::string & topic_name);
+
+  /// active_profile() against an already-computed topic set, so a caller that has one does not pay
+  /// for a second lock/copy/sort of the subscription map.
+  std::string active_profile_for(const std::vector<std::string> & current) const;
 
   /// Shared by subscribe_topics and set_topics: resolve types, subscribe, and fill the
   /// subscribed/unavailable lists.
@@ -285,6 +294,11 @@ private:
   /// recording for hours accumulates split files that would otherwise all be stat'ed each time.
   uint64_t bag_size_bytes() const;
 
+  /// The walk behind bag_size_bytes(), bypassing the cache and refreshing it. The size guard uses
+  /// this directly: a limit should be enforced on what is on disk now, not on a reading up to
+  /// kBagSizeCacheTtl old.
+  uint64_t measure_bag_size() const;
+
   /// Single source of truth for both ~/status and ~/get_status, so the two cannot drift.
   RecorderStatus build_status() const;
 
@@ -305,6 +319,30 @@ private:
   /// Write a PAUSED event if the bag is opening while already paused, so a recording that starts
   /// with a hole says why. Covers both start_paused and a ~/record issued while paused.
   void emit_initial_pause_state();
+
+  /// Stop recording if free space on the bag's filesystem has fallen below the configured minimum.
+  ///
+  /// Runs on the storage timer, independently of the bag's own size limits, because it protects
+  /// the filesystem rather than the bag: logs, core dumps or a second recorder can fill the disk
+  /// with max_bagfile_size or max_bag_size set. When triggered it emits a LowDiskEvent (published
+  /// and, unless disabled, written into the bag) and then stops, in that order, so the
+  /// explanation survives the stop.
+  void check_free_space();
+
+  /// Stop recording if the bag directory has grown past max_bag_size.
+  ///
+  /// Shares the storage timer with check_free_space() but guards the other side: the bag rather
+  /// than the disk. max_bagfile_size only rolls to a new file, so without this a recording left
+  /// running has no upper bound. Measures fresh rather than through the status cache.
+  void check_bag_size();
+
+  /// Stamp `event` with the node clock and name, publish it on `pub`, and if `record` is set write
+  /// it into the bag as well. Every event stream goes through here: the in-bag copy is the point
+  /// of the mechanism, since a gap or an end that only the topic explained would be lost with the
+  /// topic. Defined in the .cpp; only used there.
+  template<typename EventT>
+  void emit_event(
+    const typename rclcpp::Publisher<EventT>::SharedPtr & pub, bool record, EventT & event);
 
   /// Append an already-serialized event to the open bag on `event_topic`, creating the channel on
   /// first use. Takes the writer lock and releases it before returning -- callers such as pause()
@@ -367,6 +405,14 @@ private:
   /// a resume queued before a stop, must not fire against the next recording.
   void clear_scheduled();
 
+  /// Arm a one-shot node-time timer into `slot`, cancelling any pending one. A cancelled timer's
+  /// callback never runs: the executor holds service_callback_group_ from TimerBase::call() to
+  /// the callback, so nothing can cancel or replace the timer in between. `slot` must be a member
+  /// of this node, since the callback outlives this call.
+  void arm_timer(
+    rclcpp::TimerBase::SharedPtr & slot, std::chrono::nanoseconds delta,
+    std::function<void()> action);
+
   /// Validate a requested mode and tracking topic. Returns an error code, or 0 when usable.
   int32_t validate_schedule(
     int32_t mode, const std::string & tracking_topic,
@@ -383,14 +429,25 @@ private:
   /// resolving a message definition costs ~300-470ms, so skipping it matters.
   std::unordered_map<std::string, std::string> known_channels_;
 
-  /// A subscription and the switch that silences it. Dropping the handle is not enough: a
-  /// callback already queued in the executor still fires. rclcpp 33 (Rolling) has
-  /// GenericSubscription::disable_callbacks() for exactly that; on Jazzy and Kilted the callback
-  /// checks this flag first, which gives the same guarantee on every distro.
+  /// A subscription, the switch that silences it, and its sequence bookkeeping.
+  ///
+  /// Dropping the handle is not enough to stop a callback already queued in the executor. rclcpp 33
+  /// (Rolling) has GenericSubscription::disable_callbacks() for exactly that; on Jazzy and Kilted
+  /// the callback checks `enabled` first, which gives the same guarantee on every distro.
+  ///
+  /// Sequence numbers are per PUBLISHER, not per topic. Keying by topic alone is wrong the moment
+  /// a topic has more than one publisher -- /tf routinely does -- because the independent counters
+  /// interleave and every alternation looks like an enormous gap. That mistake produced a reported
+  /// 201,027,600 missing messages against 12,728 written. Keeping the map on the subscription (as
+  /// a shared_ptr the callback co-owns) means the write path needs no shared lock, and a topic
+  /// that is dropped and re-added starts clean instead of reading the publisher's continued
+  /// counting as loss. The map is only touched from this subscription's own callbacks, which are
+  /// mutually exclusive.
   struct Subscription
   {
     rclcpp::GenericSubscription::SharedPtr handle;
     std::shared_ptr<std::atomic<bool>> enabled;
+    std::shared_ptr<std::unordered_map<std::string, uint64_t>> last_publication_seq;
   };
   static void silence(Subscription & subscription);
 
@@ -421,27 +478,16 @@ private:
   rclcpp::Publisher<PauseEvent>::SharedPtr pub_pause_;
   rclcpp::Publisher<WriteSplitEvent>::SharedPtr pub_write_split_;
   rclcpp::Publisher<MessagesLostEvent>::SharedPtr pub_messages_lost_;
+  rclcpp::Publisher<LowDiskEvent>::SharedPtr pub_low_disk_;
+  rclcpp::Publisher<BagSizeLimitEvent>::SharedPtr pub_bag_size_limit_;
   rclcpp::Publisher<RecorderStatus>::SharedPtr pub_status_;
   rclcpp::TimerBase::SharedPtr status_timer_;
-
-  rclcpp::Serialization<SubscriptionChangeEvent> subscription_change_serialization_;
-  rclcpp::Serialization<PauseEvent> pause_serialization_;
 
   /// Checked in the write path. Atomic because it is read on every message and written from a
   /// service callback on a different thread.
   std::atomic_bool paused_{false};
 
-  /// Last publication sequence number seen, keyed topic -> publisher GID -> sequence.
-  ///
-  /// Sequence numbers are per PUBLISHER, not per topic. Keying by topic alone is wrong the moment
-  /// a topic has more than one publisher -- /tf routinely does -- because the independent counters
-  /// interleave and every alternation looks like an enormous gap. That mistake produced a reported
-  /// 201,027,600 missing messages against 12,728 written.
-  ///
-  /// Cleared per topic on unsubscribe: publishers keep counting while we are not listening, and
-  /// on re-subscribe that jump is deliberate, not loss.
-  std::unordered_map<std::string, std::unordered_map<std::string, uint64_t>> last_publication_seq_;
-  std::mutex sequence_mutex_;
+  /// Messages detected as missing from gaps in the per-subscription publication sequences.
   std::atomic_uint64_t messages_missed_{0};
   std::atomic_bool sequence_numbers_available_{false};
 
@@ -462,6 +508,10 @@ private:
   ScheduledAction scheduled_resume_;
   ScheduledAction scheduled_split_;
   std::string scheduled_record_uri_;
+  /// Fast path for the message callback: false means no message-time schedule can fire, so
+  /// check_scheduled() can return without taking scheduled_mutex_ on every arriving message.
+  /// Written under scheduled_mutex_ and read with a relaxed load.
+  std::atomic_bool schedule_pending_{false};
   rclcpp::TimerBase::SharedPtr resume_timer_;
   rclcpp::TimerBase::SharedPtr split_timer_;
   rclcpp::TimerBase::SharedPtr record_timer_;
@@ -482,7 +532,23 @@ private:
   std::string serialization_format_;
   bool record_subscription_events_{true};
   bool record_pause_events_{true};
+  bool record_low_disk_events_{true};
+  bool record_bag_size_limit_events_{true};
   bool snapshot_mode_{false};
+
+  /// Free space kept on the bag's filesystem, in bytes and as a percentage. Either may be 0 to
+  /// disable that half; both 0 disables the check entirely, which is the default so nothing changes
+  /// for a recorder that does not ask for it. When both are set the stricter threshold applies.
+  uint64_t min_free_space_{0};
+  double min_free_space_percent_{0.0};
+  /// Upper bound on the bag directory, across every split, in bytes. 0 disables, the default.
+  uint64_t max_bag_size_{0};
+  /// One timer paces both guards: they fire rarely, and staggering them buys nothing.
+  rclcpp::TimerBase::SharedPtr storage_check_timer_;
+  /// Why the recorder stopped itself, for the status. Each guard fires once per recording because
+  /// it stops it; ~/record clears both when the next bag opens.
+  std::atomic_bool stopped_for_low_disk_{false};
+  std::atomic_bool stopped_for_max_bag_size_{false};
 
   std::string uri_;
   std::string storage_id_;

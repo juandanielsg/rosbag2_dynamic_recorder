@@ -26,8 +26,8 @@
 `Recorder` and `discover` are resolved on first use rather than at import, so `import dynrec` costs
 nothing and, more usefully, works without rclpy present. That is not a micro-optimisation: it keeps
 the modules holding the judgement -- `discovery`, `schedule`, `topics`, `results` -- importable and
-testable with no ROS installation at all, which is the same split `build_state()` and
-`recorder_nodes()` already make in the UI and CLI packages.
+testable with no ROS installation at all. The CLI and the UI build on these same modules rather
+than carrying copies, so a rule fixed here is fixed everywhere.
 """
 
 from dynrec.errors import (

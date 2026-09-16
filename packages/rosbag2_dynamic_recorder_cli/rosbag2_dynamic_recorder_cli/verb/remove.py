@@ -12,42 +12,27 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from rosbag2_dynamic_recorder_cli.api import (
-    add_pattern_arguments,
-    add_recorder_arguments,
-    report,
-    require_a_selection,
-    with_recorder,
-)
-from rosbag2_dynamic_recorder_cli.format import format_topic_group
-from rosbag2_dynamic_recorder_cli.verb import VerbExtension
-
-from rosbag2_dynamic_recorder_interfaces.srv import UnsubscribeTopics
+from rosbag2_dynamic_recorder_cli.api import add_pattern_arguments, report_change
+from rosbag2_dynamic_recorder_cli.verb import RecorderVerb
 
 
-class RemoveVerb(VerbExtension):
+class RemoveVerb(RecorderVerb):
     """Stop recording one or more topics, leaving the rest alone."""
 
     def add_arguments(self, parser, cli_name):
-        add_recorder_arguments(parser)
+        super().add_arguments(parser, cli_name)
         parser.add_argument(
             'topics', nargs='*', metavar='TOPIC',
-            help='Topic to stop recording. Messages already written are kept; the bag simply '
-                 'stops gaining new ones')
+            help="Topic to stop recording, e.g. /scan. Messages already written are kept; the "
+                 "bag simply stops gaining new ones. As in 'add', a ':<type>' suffix is accepted "
+                 'and ignored -- only the topic name identifies what to drop')
         add_pattern_arguments(parser, 'the topics currently being recorded, not the graph')
 
-    def main(self, *, args):
-        def body(recorder):
-            require_a_selection(args)
-            request = UnsubscribeTopics.Request()
-            request.topics = list(args.topics)
-            request.regex = args.regex
-            request.exclude_regex = args.exclude_regex
-            response = recorder.call(UnsubscribeTopics, 'unsubscribe_topics', request)
-            lines = format_topic_group('no longer recording', response.unsubscribed_topics)
-            lines += format_topic_group('was not being recorded', response.not_subscribed_topics)
-            if lines:
-                print('\n'.join(lines))
-            return report(response)
-
-        return with_recorder(args, body)
+    def run(self, recorder, args):
+        # Types are stripped by dynrec before the request is sent: dropping is keyed on the topic
+        # name, so a ':<type>' suffix would otherwise match nothing.
+        report_change(
+            lambda: recorder.remove(
+                args.topics, regex=args.regex, exclude_regex=args.exclude_regex),
+            ('no longer recording', 'unsubscribed'),
+            ('was not being recorded', 'not_subscribed'))

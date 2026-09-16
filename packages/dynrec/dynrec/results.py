@@ -26,13 +26,15 @@ No ROS import. The `from_msg` constructors only read attributes, so they can be 
 any object carrying the right fields.
 """
 
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from typing import Dict, List, Optional
 
 #: Maps the uint8 action constants onto words, because a script comparing against 0 and 1 is one
 #: constant rename away from silently inverting.
 SUBSCRIPTION_ACTIONS = {0: 'subscribed', 1: 'unsubscribed'}
 PAUSE_ACTIONS = {0: 'paused', 1: 'resumed'}
+LOW_DISK_ACTIONS = {0: 'stopped'}
+BAG_SIZE_LIMIT_ACTIONS = {0: 'stopped'}
 
 
 def _stamp_seconds(stamp):
@@ -79,6 +81,23 @@ class Status:
     #: early in a healthy recording; use `messages_written` for liveness.
     bag_size_bytes: int
     sequence_numbers_available: bool
+    #: Bytes available to the recorder on the filesystem holding the bag, or 0 when it could not be
+    #: determined. This is what the free-space guard compares against.
+    free_space_bytes: int = 0
+    #: Total size of that filesystem in bytes, or 0 when it could not be determined.
+    total_space_bytes: int = 0
+    #: Configured minimum free bytes that stops recording. 0 when not set.
+    min_free_space: int = 0
+    #: Configured minimum free space as a percentage of the filesystem. 0.0 when not set.
+    min_free_space_percent: float = 0.0
+    #: True when the recorder stopped itself because free space fell below the configured minimum.
+    #: Cleared when `~/record` opens a new bag.
+    stopped_for_low_disk: bool = False
+    #: Configured cap on the bag directory in bytes, across every split. 0 when not set.
+    max_bag_size: int = 0
+    #: True when the recorder stopped itself because the bag grew past `max_bag_size`. Cleared when
+    #: `~/record` opens a new bag.
+    stopped_for_max_bag_size: bool = False
 
     @classmethod
     def from_msg(cls, msg, recorder=''):
@@ -103,29 +122,18 @@ class Status:
             bag_splits=msg.bag_splits,
             bag_size_bytes=msg.bag_size_bytes,
             sequence_numbers_available=sequence_ok,
+            free_space_bytes=msg.free_space_bytes,
+            total_space_bytes=msg.total_space_bytes,
+            min_free_space=msg.min_free_space,
+            min_free_space_percent=msg.min_free_space_percent,
+            stopped_for_low_disk=bool(msg.stopped_for_low_disk),
+            max_bag_size=msg.max_bag_size,
+            stopped_for_max_bag_size=bool(msg.stopped_for_max_bag_size),
         )
 
     def as_dict(self):
         """Plain data for logging or JSON, with the unknown-versus-zero rule intact."""
-        return {
-            'recorder': self.recorder,
-            'uri': self.uri,
-            'storage_id': self.storage_id,
-            'recording': self.recording,
-            'paused': self.paused,
-            'snapshot_mode': self.snapshot_mode,
-            'elapsed_seconds': self.elapsed_seconds,
-            'subscribed_topics': list(self.subscribed_topics),
-            'active_profile': self.active_profile,
-            'messages_written': self.messages_written,
-            'messages_missed': self.messages_missed,
-            'messages_lost_in_transport': self.messages_lost_in_transport,
-            'messages_lost_in_recorder': self.messages_lost_in_recorder,
-            'messages_lost_reported': self.messages_lost_reported,
-            'write_errors': self.write_errors,
-            'bag_splits': self.bag_splits,
-            'bag_size_bytes': self.bag_size_bytes,
-        }
+        return asdict(self)
 
 
 @dataclass(frozen=True)
@@ -203,28 +211,39 @@ class Profiles:
 
 @dataclass(frozen=True)
 class Event:
-    """One thing that happened to the recording, from either event stream.
+    """One thing that happened to the recording, from one of four event streams.
 
-    Both streams are flattened into one shape because a caller watching for "what changed" wants
-    them interleaved, and because the two are only meaningful together: a subscription event
-    explains a channel that stops, a pause event explains a bag that stops.
+    All four are flattened into one shape because a caller watching for "what changed" wants them
+    interleaved, and because they are only meaningful together: a subscription event explains a
+    channel that stops, a pause event explains a bag that stops, and a low-disk or bag-size-limit
+    event explains a recording the recorder ended itself, to protect the filesystem or to honour
+    a cap on the bag.
 
     `stamp` is on the recorder's clock. Sort by it rather than by arrival: the streams come in on
     separate subscriptions, so delivery order is not the order things happened.
     """
 
-    #: 'subscription' or 'pause'.
+    #: 'subscription', 'pause', 'low_disk' or 'bag_size_limit'.
     kind: str
-    #: 'subscribed', 'unsubscribed', 'paused' or 'resumed'.
+    #: 'subscribed', 'unsubscribed', 'paused', 'resumed' or 'stopped'.
     action: str
     #: Epoch seconds on the recorder's clock.
     stamp: float
-    #: What caused it, e.g. 'service:set_topics', 'schedule:resume', 'startup'.
+    #: What caused it, e.g. 'service:set_topics', 'schedule:resume', 'startup', 'timer'.
     reason: str
     node_name: str
-    #: Empty for a pause event, which affects every topic at once.
+    #: Empty for a pause, low-disk or bag-size-limit event, which affect the whole recording rather
+    #: than one topic.
     topic: str = ''
     topic_type: str = ''
+    #: For a low-disk event: bytes available on the recorder's filesystem at the check that fired,
+    #: and its total size. Zero on the other kinds, which have no filesystem figure to carry.
+    free_space_bytes: int = 0
+    total_space_bytes: int = 0
+    #: For a bag-size-limit event: the bag's size on disk at the check that fired, and the limit it
+    #: exceeded. Zero on the other kinds.
+    bag_size_bytes: int = 0
+    max_bag_size: int = 0
 
     @classmethod
     def from_subscription_msg(cls, msg):
@@ -247,3 +266,38 @@ class Event:
             reason=msg.reason,
             node_name=msg.node_name,
         )
+
+    @classmethod
+    def from_low_disk_msg(cls, msg):
+        return cls(
+            kind='low_disk',
+            action=LOW_DISK_ACTIONS.get(msg.action, str(msg.action)),
+            stamp=_stamp_seconds(msg.stamp),
+            reason=msg.reason,
+            node_name=msg.node_name,
+            free_space_bytes=msg.free_space_bytes,
+            total_space_bytes=msg.total_space_bytes,
+        )
+
+    @classmethod
+    def from_bag_size_limit_msg(cls, msg):
+        return cls(
+            kind='bag_size_limit',
+            action=BAG_SIZE_LIMIT_ACTIONS.get(msg.action, str(msg.action)),
+            stamp=_stamp_seconds(msg.stamp),
+            reason=msg.reason,
+            node_name=msg.node_name,
+            bag_size_bytes=msg.bag_size_bytes,
+            max_bag_size=msg.max_bag_size,
+        )
+
+
+#: The recorder's event streams: topic suffix under the recorder's name, the message type in
+#: `rosbag2_dynamic_recorder_interfaces.msg`, and the Event constructor for it. The client
+#: subscribes to every row and the bag reader decodes every row, so a new stream is one row here.
+EVENT_STREAMS = {
+    '/events/subscription_change': ('SubscriptionChangeEvent', Event.from_subscription_msg),
+    '/events/pause': ('PauseEvent', Event.from_pause_msg),
+    '/events/low_disk': ('LowDiskEvent', Event.from_low_disk_msg),
+    '/events/bag_size_limit': ('BagSizeLimitEvent', Event.from_bag_size_limit_msg),
+}

@@ -46,7 +46,7 @@ NODE = shutil.which("node") or shutil.which("nodejs")
 needs_node = pytest.mark.skipif(
     NODE is None, reason="node is not installed; add nodejs to the image to run these")
 
-#: Mirrors what `build_state` returns for a connected recorder, plus the two keys `snapshot_state`
+#: Mirrors what `build_state` returns for a connected recorder.
 #: adds. Written out rather than imported so these tests need only node, not a ROS install --
 #: `test_build_state.py` asserts the two stay in step, which is where the drift would show.
 SAMPLE_STATE = {
@@ -72,24 +72,26 @@ SAMPLE_STATE = {
     "write_errors": 0,
     "bag_splits": 1,
     "bag_size_bytes": 4096,
-    "events": [
-        {"kind": "pause", "topic": "", "action": "resumed",
-         "reason": "service:resume", "stamp": 1788500055.0},
-        {"kind": "topic", "topic": "/spike/b", "action": "unsubscribed",
-         "reason": "service:unsubscribe_topics", "stamp": 1788500030.0},
-    ],
+    "sequence_numbers_available": False,
+    "free_space_bytes": 0,
+    "total_space_bytes": 0,
+    "min_free_space": 0,
+    "min_free_space_percent": 0.0,
+    "stopped_for_low_disk": False,
+    "max_bag_size": 0,
+    "stopped_for_max_bag_size": False,
     "profiles": [
         {"name": "light", "topics": ["/spike/a"]},
         {"name": "everything", "topics": ["/spike/a", "/spike/b", "/spike/c"]},
     ],
     "history": [
-        {"kind": "topic", "topic": "/spike/a", "action": "subscribed",
+        {"kind": "subscription", "topic": "/spike/a", "action": "subscribed",
          "reason": "startup", "stamp": 1788500000.4},
-        {"kind": "topic", "topic": "/spike/b", "action": "subscribed",
+        {"kind": "subscription", "topic": "/spike/b", "action": "subscribed",
          "reason": "startup", "stamp": 1788500001.1},
-        {"kind": "topic", "topic": "/spike/c", "action": "subscribed",
+        {"kind": "subscription", "topic": "/spike/c", "action": "subscribed",
          "reason": "service:subscribe_topics", "stamp": 1788500011.3},
-        {"kind": "topic", "topic": "/spike/b", "action": "unsubscribed",
+        {"kind": "subscription", "topic": "/spike/b", "action": "unsubscribed",
          "reason": "service:unsubscribe_topics", "stamp": 1788500030.0},
         {"kind": "pause", "topic": "", "action": "paused",
          "reason": "service:pause", "stamp": 1788500041.0},

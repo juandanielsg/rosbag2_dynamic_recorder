@@ -48,12 +48,17 @@ ros2 launch rosbag2_dynamic_recorder dynamic_recorder.launch.py \
 | `storage_preset_profile` | *(empty)* | Storage plugin preset. mcap: `none`, `fastwrite`, `zstd_fast`, `zstd_small`. |
 | `storage_config_uri` | *(empty)* | Storage plugin YAML, overlaid on the preset. |
 | `record_subscription_events` | `true` | Write subscription changes into the bag. |
+| `min_free_space` | `0` | Stop recording below this many bytes free on the bag filesystem; `0` disables. |
+| `min_free_space_percent` | `0.0` | Same, as a percentage of the filesystem; `0.0` disables. The stricter applies. |
+| `max_bag_size` | `0` | Stop recording once the bag directory, across every split, exceeds this many bytes; `0` disables. |
 | `messages_lost_report_period` | `5.0` | Seconds between `MessagesLostEvent`. `0` disables. |
 | `params_file` | *(empty)* | Optional YAML of extra parameters, e.g. profiles. |
 
-The other node parameters (`record_pause_events`, `status_publish_period`, `profile_names` and the
-profiles themselves) are not launch arguments. Set them through `params_file`, or with
-`-p name:=value` when running the node directly:
+The other node parameters (`record_pause_events`, `record_low_disk_events`,
+`record_bag_size_limit_events`, `storage_check_period`, `status_publish_period`, `profile_names`
+and the profiles themselves)
+are not launch arguments. Set them through `params_file`, or with `-p name:=value` when running the
+node directly:
 
 ```bash
 ros2 run rosbag2_dynamic_recorder dynamic_recorder --ros-args \

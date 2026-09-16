@@ -81,10 +81,19 @@ rec.on_status(lambda s: print(s.messages_written))
 rec.wait_for(lambda s: not s.recording, timeout=60)
 ```
 
-Both event streams arrive flattened into one {py:class}`~dynrec.results.Event`, because a channel
-that stops and a bag that stops are the same question asked twice. They come in on separate
-subscriptions, so sort by `event.stamp`, the recorder's clock, rather than trusting the order they
-were delivered in.
+All four event streams arrive flattened into one {py:class}`~dynrec.results.Event`, because a
+channel that stops, a bag that stops, and a recording the recorder ended itself are the same question
+asked twice. The last two are the recorder's own stops: a `low_disk` event when free space falls
+below its configured minimum, and a `bag_size_limit` event when the bag grows past `max_bag_size`.
+Either way a supervisor can react without polling.
+
+```python
+rec.on_event(lambda e: e.kind in ('low_disk', 'bag_size_limit') and shutdown())
+```
+
+They come in on separate subscriptions, so sort by `event.stamp`, the recorder's clock, rather than
+trusting the order they were delivered in. The same state is on the status, as `free_space_bytes`,
+`total_space_bytes` and `stopped_for_low_disk`, and `max_bag_size` and `stopped_for_max_bag_size`.
 
 `wait_for` is written against the latched status topic rather than a polling loop, so the current
 state counts: `rec.wait_for(lambda s: not s.recording)` returns at once if the recorder is already
@@ -172,6 +181,11 @@ plausible number.
 `summary.unexplained_gaps` carries the other half: a hole shared by every live channel that no pause
 accounts for. A crash, a stall, or a pause recorded with the events off all look like that, and the
 reader says so instead of averaging over it.
+
+`summary.low_disk_stop` is the `LowDiskEvent` when the recorder ended the recording to protect the
+disk, and `summary.bag_size_limit_stop` the `BagSizeLimitEvent` when it ended it at the bag's
+configured cap, so the end of the bag can be told apart from a crash or a power loss rather than
+merely reported as the last message.
 
 ## Several recorders
 

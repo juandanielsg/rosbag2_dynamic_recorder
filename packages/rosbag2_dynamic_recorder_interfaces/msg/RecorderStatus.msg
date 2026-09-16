@@ -97,3 +97,30 @@ uint64 bag_splits
 # NOTE: bytes *flushed to disk*, not bytes captured. The writer caches, so this reads 0 early in a
 # recording even though messages are being captured normally. Use messages_written for liveness.
 uint64 bag_size_bytes
+
+# Bytes available to this process on the filesystem holding the bag, or 0 if it could not be
+# determined. This is the figure min_free_space / min_free_space_percent are compared against.
+uint64 free_space_bytes
+
+# Total size of that filesystem in bytes, or 0 if it could not be determined. Carried so a client
+# can show a percentage without a second query.
+uint64 total_space_bytes
+
+# Configured minimum free bytes that stops recording. 0 when not set.
+uint64 min_free_space
+
+# Configured minimum free space as a percentage of the filesystem. 0.0 when not set.
+float64 min_free_space_percent
+
+# True when the recorder stopped itself because free space fell below the configured minimum.
+# Latched: stays true even after free space recovers, until ~/record opens a new bag.
+bool stopped_for_low_disk
+
+# Configured maximum size of the bag directory in bytes, across every split, that stops recording.
+# 0 when not set. Compared against bag_size_bytes, so it inherits that field's caveat: the writer
+# cache is not counted until it is flushed.
+uint64 max_bag_size
+
+# True when the recorder stopped itself because the bag grew past max_bag_size. Cleared when
+# ~/record opens a new bag.
+bool stopped_for_max_bag_size

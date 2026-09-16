@@ -14,17 +14,15 @@
 
 import time
 
-from dynrec.services import Record
-from rosbag2_dynamic_recorder_cli.api import add_recorder_arguments, report, with_recorder
-from rosbag2_dynamic_recorder_cli.format import format_duration, parse_time
-from rosbag2_dynamic_recorder_cli.verb import VerbExtension
+from rosbag2_dynamic_recorder_cli.format import format_duration
+from rosbag2_dynamic_recorder_cli.verb import RecorderVerb
 
 
-class RecordVerb(VerbExtension):
+class RecordVerb(RecorderVerb):
     """Open a new bag after a stop, restoring the previous topic selection."""
 
     def add_arguments(self, parser, cli_name):
-        add_recorder_arguments(parser)
+        super().add_arguments(parser, cli_name)
         parser.add_argument(
             '--uri', default='', metavar='PATH',
             help='Where to create the new bag directory. Default: the uri the recorder was '
@@ -36,21 +34,9 @@ class RecordVerb(VerbExtension):
                  'takes no mode field, so it is node time by definition and fires on a timer '
                  'whether or not any messages are arriving')
 
-    def main(self, *, args):
-        def body(recorder):
-            request = Record.Request()
-            request.uri = args.uri
-            at = None
-            if args.at is not None:
-                seconds, nanoseconds = parse_time(args.at)
-                request.start_time.sec = seconds
-                request.start_time.nanosec = nanoseconds
-                at = seconds + nanoseconds / 1e9
-            response = recorder.call(Record, 'record', request)
-            if at is None:
-                return report(response, 'recording')
-            return report(
-                response,
-                'recording scheduled in {}'.format(format_duration(at - time.time())))
-
-        return with_recorder(args, body)
+    def run(self, recorder, args):
+        at = recorder.record(uri=args.uri, at=args.at)
+        if at is None:
+            print('recording')
+        else:
+            print('recording scheduled in {}'.format(format_duration(at - time.time())))

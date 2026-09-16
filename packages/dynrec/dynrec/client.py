@@ -45,11 +45,8 @@ from rclpy.executors import SingleThreadedExecutor
 from rclpy.node import Node
 from rclpy.qos import DurabilityPolicy, HistoryPolicy, QoSProfile, ReliabilityPolicy
 
-from rosbag2_dynamic_recorder_interfaces.msg import (
-    PauseEvent,
-    RecorderStatus,
-    SubscriptionChangeEvent,
-)
+from rosbag2_dynamic_recorder_interfaces import msg as interface_msgs
+from rosbag2_dynamic_recorder_interfaces.msg import RecorderStatus
 from rosbag2_dynamic_recorder_interfaces.srv import (
     GetProfiles,
     GetStatus,
@@ -62,7 +59,7 @@ from rosbag2_dynamic_recorder_interfaces.srv import (
 
 from dynrec.discovery import choose_recorder, recorder_nodes
 from dynrec.errors import CallFailed, CallTimeout, ServiceUnavailable
-from dynrec.results import Event, Profiles, Status, TopicChange
+from dynrec.results import EVENT_STREAMS, Profiles, Status, TopicChange
 # Not from rosbag2_interfaces directly: which definition of these the recorder offers depends on
 # the installed rosbag2, and dynrec.services resolves that the same way the recorder does.
 from dynrec.services import (
@@ -464,12 +461,13 @@ class Recorder:
         return _Handle(lambda: self._drop(self._status_callbacks, callback))
 
     def on_event(self, callback):
-        """Call `callback(event)` for every subscription change and every pause.
+        """Call `callback(event)` for every subscription change, pause and self-inflicted stop.
 
-        Both streams, flattened into one :class:`Event`, because they are only meaningful together:
-        one explains a channel that stops, the other a bag that stops. They arrive on separate
-        subscriptions, so if order matters, sort by `event.stamp` rather than trusting the order
-        they were delivered in.
+        All four streams, flattened into one :class:`Event`, because they are only meaningful
+        together: one explains a channel that stops, another a bag that stops, the other two a
+        recording the recorder ended itself, for the disk or for a cap on the bag. They arrive on
+        separate subscriptions, so if order matters, sort by `event.stamp` rather than trusting
+        the order they were delivered in.
 
         Same callback rules and same handle as :meth:`on_status`.
         """
@@ -483,15 +481,10 @@ class Recorder:
                     history=HistoryPolicy.KEEP_LAST)
                 self._event_subs = [
                     self._ros.node.create_subscription(
-                        SubscriptionChangeEvent,
-                        '{}/events/subscription_change'.format(self.name),
-                        lambda msg: self._deliver_event(Event.from_subscription_msg(msg)),
-                        events_qos),
-                    self._ros.node.create_subscription(
-                        PauseEvent,
-                        '{}/events/pause'.format(self.name),
-                        lambda msg: self._deliver_event(Event.from_pause_msg(msg)),
-                        events_qos),
+                        getattr(interface_msgs, msg_type), self.name + suffix,
+                        lambda msg, parse=parse: self._deliver_event(parse(msg)),
+                        events_qos)
+                    for suffix, (msg_type, parse) in EVENT_STREAMS.items()
                 ]
         return _Handle(lambda: self._drop(self._event_callbacks, callback))
 
@@ -588,14 +581,16 @@ class Recorder:
         """Turn the `return_code`/`error_string` pair most services share into an exception.
 
         Services with no return code -- Pause, TogglePaused, Snapshot -- pass through untouched;
-        their callers handle what little there is to handle.
+        their callers handle what little there is to handle. The response is attached to the
+        exception so a caller that prints its lists (a CLI) can still do so.
         """
         code = getattr(response, 'return_code', 0)
         if code != 0:
             detail = getattr(response, 'error_string', '') or 'return_code {}'.format(code)
             raise CallFailed(
                 '{} refused the call: {}'.format(service, detail),
-                return_code=code, error_string=getattr(response, 'error_string', ''))
+                return_code=code, error_string=getattr(response, 'error_string', ''),
+                response=response)
         return response
 
     def _unreachable_message(self, service):

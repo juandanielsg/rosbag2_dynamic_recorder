@@ -47,6 +47,15 @@ ARGUMENTS = [
     ('storage_config_uri', '', 'Path to a storage-plugin YAML, overlaid on the preset.'),
     ('record_subscription_events', 'true',
      'Record SubscriptionChangeEvent into the bag, so sparse channels explain themselves.'),
+    ('min_free_space', '0',
+     'Stop recording when free space on the bag filesystem falls below this many bytes; '
+     '0 disables. Protects the disk, not the bag: logs or a second recorder can fill it.'),
+    ('min_free_space_percent', '0.0',
+     'Same, as a percentage of the filesystem; 0.0 disables. When both are set the stricter one '
+     'applies.'),
+    ('max_bag_size', '0',
+     'Stop recording when the bag directory, across every split, grows past this many bytes; '
+     '0 disables. A cap on the recording where max_bagfile_size only rolls to a new file.'),
     ('messages_lost_report_period', '5.0',
      'Seconds between MessagesLostEvent publications. 0 disables reporting.'),
     ('params_file', '', 'Optional YAML of extra parameters, e.g. recording profiles.'),
@@ -94,6 +103,10 @@ def recorder_parameters(context):
         'storage_config_uri': LaunchConfiguration('storage_config_uri').perform(context),
         'record_subscription_events':
             LaunchConfiguration('record_subscription_events').perform(context) == 'true',
+        'min_free_space': int(LaunchConfiguration('min_free_space').perform(context)),
+        'min_free_space_percent':
+            float(LaunchConfiguration('min_free_space_percent').perform(context)),
+        'max_bag_size': int(LaunchConfiguration('max_bag_size').perform(context)),
         'messages_lost_report_period':
             float(LaunchConfiguration('messages_lost_report_period').perform(context)),
     }

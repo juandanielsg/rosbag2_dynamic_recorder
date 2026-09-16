@@ -24,7 +24,8 @@ No ROS graph needed -- build_state is deliberately a plain function.
 
 from types import SimpleNamespace
 
-from rosbag2_dynamic_recorder_ui.ui_node import build_state, recent_events
+from dynrec.results import Status
+from rosbag2_dynamic_recorder_ui.ui_node import build_state
 
 
 def _status(**overrides):
@@ -47,13 +48,22 @@ def _status(**overrides):
         write_errors=0,
         bag_splits=0,
         bag_size_bytes=2048,
+        free_space_bytes=0,
+        total_space_bytes=0,
+        min_free_space=0,
+        min_free_space_percent=0.0,
+        stopped_for_low_disk=False,
+        max_bag_size=0,
+        stopped_for_max_bag_size=False,
     )
     base.update(overrides)
-    return SimpleNamespace(**base)
+    # As the page receives it: through the library's own reading of the message, which is where
+    # the unknown-versus-zero rule now lives. These tests check it survives the trip to the page.
+    return Status.from_msg(SimpleNamespace(**base), recorder='/rec')
 
 
-def _state(status, age=0.0):
-    return build_state(status, age, "/rec", ["/a", "/b", "/c"], [])
+def _state(status, age=0.0, history=()):
+    return build_state(status, age, "/rec", ["/a", "/b", "/c"], list(history), [])
 
 
 def test_missing_is_unknown_when_sequence_numbers_unavailable():
@@ -93,7 +103,7 @@ def test_writer_loss_and_transport_loss_reach_the_page_separately():
 
 
 def test_disconnected_state_claims_nothing():
-    state = build_state(None, None, "/rec", ["/a"], [])
+    state = _state(None)
     assert state["connected"] is False
     for field in ("messages_written", "messages_missed", "recording", "uri"):
         assert field not in state, f"{field} must not be invented while disconnected"
@@ -112,7 +122,7 @@ def test_fields_are_plain_json_types():
     assert isinstance(state["paused"], bool)
 
 
-def _event(stamp, kind="topic", action="subscribed", topic="/a", reason="startup"):
+def _event(stamp, kind="subscription", action="subscribed", topic="/a", reason="startup"):
     return {"kind": kind, "topic": topic, "action": action, "reason": reason, "stamp": stamp}
 
 
@@ -127,18 +137,14 @@ def test_events_are_ordered_by_when_they_happened_not_when_they_arrived():
         _event(10.0, topic="/a"),
         _event(20.0, topic="/b", action="unsubscribed"),
     ]
-    assert [e["stamp"] for e in recent_events(out_of_order)] == [30.0, 20.0, 10.0]
-
-
-def test_the_feed_keeps_only_the_newest_events():
-    assert [e["stamp"] for e in recent_events([_event(float(i)) for i in range(40)], limit=3)] == [
-        39.0, 38.0, 37.0
-    ]
+    history = _state(_status(), history=out_of_order)["history"]
+    assert [e["stamp"] for e in history] == [10.0, 20.0, 30.0]
 
 
 def test_a_pause_event_carries_no_topic():
     """The page renders "all topics" for these; an invented topic name would be a lie."""
-    (event,) = recent_events([_event(1.0, kind="pause", action="paused", topic="")])
+    pause = _event(1.0, kind="pause", action="paused", topic="")
+    (event,) = _state(_status(), history=[pause])["history"]
     assert event["kind"] == "pause"
     assert event["topic"] == ""
 
@@ -156,8 +162,7 @@ def test_the_timeline_axis_comes_from_the_recorder_clock():
 
 def test_a_disconnected_page_gets_no_axis_to_draw_on():
     """Without a status there is no session to place events against, so claim nothing."""
-    state = build_state(None, None, "/rec", ["/a"], [])
-    assert "recording_started" not in state
+    assert "recording_started" not in _state(None)
 
 
 def test_the_page_fixture_matches_what_build_state_actually_returns():
@@ -171,8 +176,7 @@ def test_the_page_fixture_matches_what_build_state_actually_returns():
     from test_page_script import SAMPLE_STATE
 
     real = set(_state(_status()))
-    # snapshot_state() adds these two after build_state returns.
-    fixture = set(SAMPLE_STATE) - {"profiles", "history"}
+    fixture = set(SAMPLE_STATE)
     assert fixture == real, (
         "the page fixture and build_state have diverged; "
         f"only in fixture: {sorted(fixture - real)}, only in build_state: {sorted(real - fixture)}"

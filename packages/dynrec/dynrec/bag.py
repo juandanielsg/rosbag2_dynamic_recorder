@@ -42,6 +42,8 @@ answer is unknown rather than a plausible number. `ChannelStats.rate` is None in
 from dataclasses import dataclass, field
 from typing import List, Optional, Tuple
 
+from dynrec.results import EVENT_STREAMS, Event
+
 #: How much of a simultaneous, unexplained hole is worth mentioning. Below this, ordinary
 #: scheduling jitter across a handful of topics would raise a permanent false alarm.
 UNEXPLAINED_GAP_SECONDS = 1.0
@@ -95,11 +97,19 @@ class BagSummary:
     channels: List[ChannelStats] = field(default_factory=list)
     #: Windows during which the recorder was paused, from the PauseEvents in the bag.
     pause_windows: List[Tuple[float, float]] = field(default_factory=list)
-    #: Every SubscriptionChangeEvent and PauseEvent, oldest first, as `dynrec.results.Event`.
-    events: List[object] = field(default_factory=list)
+    #: Every recorder event in the bag, oldest first.
+    events: List[Event] = field(default_factory=list)
     #: Simultaneous holes across every live channel that no PauseEvent accounts for. A crash, a
     #: stall, or a pause recorded with `record_pause_events:=false` all look like this.
     unexplained_gaps: List[Tuple[float, float]] = field(default_factory=list)
+    #: The LowDiskEvent if the recorder stopped itself because free space fell below the configured
+    #: minimum, else None. Absence means either it did not stop that way, or the event was not
+    #: recorded (`record_low_disk_events:=false`); the two cannot be told apart from the bag alone.
+    low_disk_stop: Optional[Event] = None
+    #: The BagSizeLimitEvent if the recorder stopped itself because the bag grew past
+    #: `max_bag_size`, else None. Same caveat: absence may mean
+    #: `record_bag_size_limit_events:=false`.
+    bag_size_limit_stop: Optional[Event] = None
     #: Things the reader could not establish, in the words a reader of the report needs.
     warnings: List[str] = field(default_factory=list)
 
@@ -273,13 +283,18 @@ def describe(uri, storage_id=''):
     from rosidl_runtime_py.utilities import get_message
     import rosbag2_py
 
-    from dynrec.results import Event
-
     reader = rosbag2_py.SequentialReader()
     reader.open(
         rosbag2_py.StorageOptions(uri=str(uri), storage_id=storage_id),
         rosbag2_py.ConverterOptions('', ''))
     types = {topic.name: topic.type for topic in reader.get_all_topics_and_types()}
+    # The recorder's event channels, by name, with the Event constructor that decodes each. Every
+    # other channel is data.
+    event_parsers = {
+        name: parse
+        for name in types
+        for suffix, (_, parse) in EVENT_STREAMS.items() if name.endswith(suffix)
+    }
 
     # read_next() is deprecated in favour of read_next_ext(), which returns the send timestamp as
     # well as the receive one. The receive timestamp is the one taken here either way: it is the
@@ -296,12 +311,9 @@ def describe(uri, storage_id=''):
             topic, data, nanoseconds = reader.read_next()
         seconds = nanoseconds / 1e9
         stamps.setdefault(topic, []).append(seconds)
-        if topic.endswith('/events/subscription_change'):
-            events.append(Event.from_subscription_msg(
-                deserialize_message(data, get_message(types[topic]))))
-        elif topic.endswith('/events/pause'):
-            events.append(Event.from_pause_msg(
-                deserialize_message(data, get_message(types[topic]))))
+        parse = event_parsers.get(topic)
+        if parse:
+            events.append(parse(deserialize_message(data, get_message(types[topic]))))
 
     populated = {name: values for name, values in stamps.items() if values}
     if not populated:
@@ -318,9 +330,7 @@ def describe(uri, storage_id=''):
     has_pause_events = any(event.kind == 'pause' for event in events)
 
     channels = []
-    data_topics = sorted(
-        name for name in populated
-        if not (name.endswith('/events/subscription_change') or name.endswith('/events/pause')))
+    data_topics = sorted(name for name in populated if name not in event_parsers)
     for topic in data_topics:
         values = sorted(populated[topic])
         windows = subscribed_windows(events, topic, end)
@@ -378,9 +388,29 @@ def describe(uri, storage_id=''):
             'record_pause_events:=false all look like this.'.format(
                 gap_end - gap_start, gap_start - start))
 
+    def last_event(kind):
+        return next((event for event in reversed(events) if event.kind == kind), None)
+
+    low_disk_stop = last_event('low_disk')
+    if low_disk_stop is not None:
+        warnings.append(
+            'this recording ended because free space on the bag filesystem fell below the '
+            'configured minimum ({} bytes available of {}). The recorder stopped itself to leave '
+            'the disk usable, so the end of the bag is deliberate rather than a crash or a power '
+            'loss.'.format(low_disk_stop.free_space_bytes, low_disk_stop.total_space_bytes))
+
+    bag_size_limit_stop = last_event('bag_size_limit')
+    if bag_size_limit_stop is not None:
+        warnings.append(
+            'this recording ended because the bag reached its configured size limit ({} bytes on '
+            'disk, limit {}). The recorder stopped itself, so the end of the bag is deliberate '
+            'rather than a crash or a power loss.'.format(
+                bag_size_limit_stop.bag_size_bytes, bag_size_limit_stop.max_bag_size))
+
     return BagSummary(
         uri=str(uri), start=start, end=end, channels=channels, pause_windows=pauses,
-        events=events, unexplained_gaps=unexplained, warnings=warnings)
+        events=events, unexplained_gaps=unexplained, low_disk_stop=low_disk_stop,
+        bag_size_limit_stop=bag_size_limit_stop, warnings=warnings)
 
 
 def format_summary(summary):
@@ -452,5 +482,7 @@ def summary_dict(summary):
             {'start': begin - summary.start, 'end': finish - summary.start}
             for begin, finish in summary.unexplained_gaps
         ],
+        'stopped_for_low_disk': summary.low_disk_stop is not None,
+        'stopped_for_max_bag_size': summary.bag_size_limit_stop is not None,
         'warnings': list(summary.warnings),
     }

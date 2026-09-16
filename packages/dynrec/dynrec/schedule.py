@@ -36,6 +36,7 @@ TIME_MODES = {
 }
 
 _RELATIVE = re.compile(r'^\+(\d+(?:\.\d+)?)([smh]?)$')
+_WALL_CLOCK = re.compile(r'^\d{1,2}:\d{2}(:\d{2})?$')
 _UNIT_SECONDS = {'': 1.0, 's': 1.0, 'm': 60.0, 'h': 3600.0}
 
 
@@ -79,8 +80,12 @@ def parse_time(value, now=None):
     except ValueError:
         pass
 
-    if re.match(r'^\d{1,2}:\d{2}(:\d{2})?$', text):
-        return _split(_next_wall_clock(text, now))
+    if _WALL_CLOCK.match(text):
+        try:
+            return _split(_next_wall_clock(text, now))
+        except ValueError as exc:
+            # The shape is right but a field is out of range: datetime says which.
+            raise InvalidRequest("cannot read '{}' as a time of day: {}".format(value, exc))
 
     try:
         parsed = datetime.fromisoformat(text)

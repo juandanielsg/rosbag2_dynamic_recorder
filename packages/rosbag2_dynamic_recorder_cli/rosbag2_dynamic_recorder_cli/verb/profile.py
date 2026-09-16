@@ -12,35 +12,25 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from rosbag2_dynamic_recorder_cli.api import add_recorder_arguments, report, with_recorder
-from rosbag2_dynamic_recorder_cli.format import format_topic_group
-from rosbag2_dynamic_recorder_cli.verb import VerbExtension
-
-from rosbag2_dynamic_recorder_interfaces.srv import SetProfile
+from rosbag2_dynamic_recorder_cli.api import report_change
+from rosbag2_dynamic_recorder_cli.verb import RecorderVerb
 
 
-class ProfileVerb(VerbExtension):
+class ProfileVerb(RecorderVerb):
     """Apply a named profile: record exactly the topics it lists."""
 
     def add_arguments(self, parser, cli_name):
-        add_recorder_arguments(parser)
+        super().add_arguments(parser, cli_name)
         parser.add_argument(
             'name', metavar='NAME',
             help='Profile name, as declared in the profile_names parameter. '
                  "'ros2 dynrec profiles' lists them")
 
-    def main(self, *, args):
-        def body(recorder):
-            request = SetProfile.Request()
-            request.name = args.name
-            # Routed through the same code as set_topics inside the recorder, so switching
-            # profiles inherits the guarantee: topics common to both are never torn down.
-            response = recorder.call(SetProfile, 'set_profile', request)
-            lines = format_topic_group('now recording', response.subscribed_topics)
-            lines += format_topic_group('no longer recording', response.unsubscribed_topics)
-            lines += format_topic_group('unavailable', response.unavailable_topics)
-            if lines:
-                print('\n'.join(lines))
-            return report(response)
-
-        return with_recorder(args, body)
+    def run(self, recorder, args):
+        # Routed through the same code as set_topics inside the recorder, so switching profiles
+        # inherits the guarantee: topics common to both are never torn down.
+        report_change(
+            lambda: recorder.profile(args.name),
+            ('now recording', 'subscribed'),
+            ('no longer recording', 'unsubscribed'),
+            ('unavailable', 'unavailable'))

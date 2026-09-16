@@ -51,6 +51,13 @@ def status_msg(**overrides):
         write_errors=0,
         bag_splits=1,
         bag_size_bytes=4096,
+        free_space_bytes=0,
+        total_space_bytes=0,
+        min_free_space=0,
+        min_free_space_percent=0.0,
+        stopped_for_low_disk=False,
+        max_bag_size=0,
+        stopped_for_max_bag_size=False,
     )
     fields.update(overrides)
     return SimpleNamespace(**fields)
@@ -164,6 +171,55 @@ def test_pause_events_name_no_topic_because_they_affect_every_one():
         node_name='/rosbag2_dynamic_recorder'))
     assert (event.kind, event.action, event.topic) == ('pause', 'paused', '')
     assert event.stamp == 20.25
+
+
+def test_low_disk_events_carry_the_filesystem_numbers():
+    """The figures are on the event, not only in the status, so it explains itself after the
+    recorder has stopped and the status is no longer being published."""
+    event = Event.from_low_disk_msg(SimpleNamespace(
+        action=0, stamp=stamp(30), reason='timer', node_name='/r',
+        free_space_bytes=123, total_space_bytes=456))
+    assert (event.kind, event.action, event.topic) == ('low_disk', 'stopped', '')
+    assert event.free_space_bytes == 123
+    assert event.total_space_bytes == 456
+    assert event.stamp == 30.0
+
+
+def test_status_reports_free_space_and_a_low_disk_stop():
+    status = Status.from_msg(status_msg(
+        free_space_bytes=1000, total_space_bytes=4000,
+        min_free_space=500, min_free_space_percent=10.0, stopped_for_low_disk=True))
+    assert status.free_space_bytes == 1000
+    assert status.total_space_bytes == 4000
+    assert status.min_free_space == 500
+    assert status.min_free_space_percent == 10.0
+    assert status.stopped_for_low_disk is True
+    as_dict = status.as_dict()
+    assert as_dict['free_space_bytes'] == 1000
+    assert as_dict['stopped_for_low_disk'] is True
+    # as_dict used to drop these two while carrying every other field.
+    assert as_dict['recording_started'] == 1756900000.5
+    assert as_dict['sequence_numbers_available'] is True
+
+
+def test_bag_size_limit_events_carry_the_size_and_the_limit():
+    event = Event.from_bag_size_limit_msg(SimpleNamespace(
+        action=0, stamp=stamp(40), reason='timer', node_name='/r',
+        bag_size_bytes=2_000_000, max_bag_size=1_000_000))
+    assert (event.kind, event.action, event.topic) == ('bag_size_limit', 'stopped', '')
+    assert event.bag_size_bytes == 2_000_000
+    assert event.max_bag_size == 1_000_000
+    assert event.free_space_bytes == 0, 'a size-limit event carries no filesystem figure'
+    assert event.stamp == 40.0
+
+
+def test_status_reports_the_bag_size_limit_and_a_size_stop():
+    status = Status.from_msg(status_msg(max_bag_size=1_000_000, stopped_for_max_bag_size=True))
+    assert status.max_bag_size == 1_000_000
+    assert status.stopped_for_max_bag_size is True
+    as_dict = status.as_dict()
+    assert as_dict['max_bag_size'] == 1_000_000
+    assert as_dict['stopped_for_max_bag_size'] is True
 
 
 def test_both_event_streams_sort_together_on_the_recorder_stamp():

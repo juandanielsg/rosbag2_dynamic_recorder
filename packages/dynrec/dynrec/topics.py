@@ -36,6 +36,8 @@ def parse_topic_specs(values):
     topics = []
     types = []
     for value in values or ():
+        if not isinstance(value, str):
+            raise InvalidRequest('{!r} is not a topic name'.format(value))
         topic, separator, type_name = value.partition(':')
         if not topic:
             raise InvalidRequest("'{}' has no topic name".format(value))
@@ -55,4 +57,4 @@ def require_a_selection(topics, regex):
     script has no way to notice that -- the same reason `ros2 dynrec add` refuses it.
     """
     if not topics and not regex:
-        raise InvalidRequest('name at least one topic, or select some with regex=')
+        raise InvalidRequest('name at least one topic, or select some with a regex')

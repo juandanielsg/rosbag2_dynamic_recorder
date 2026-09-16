@@ -94,6 +94,11 @@ def test_a_trailing_colon_is_refused_rather_than_read_as_no_type():
         parse_topic_specs(['/scan:'])
 
 
+def test_a_non_string_is_refused_as_a_bad_request_not_a_crash():
+    with pytest.raises(InvalidRequest, match='123'):
+        parse_topic_specs([123])
+
+
 def test_a_selection_that_names_and_matches_nothing_is_refused():
     """A silent no-op reported as success is the one thing a supervisor script cannot notice."""
     with pytest.raises(InvalidRequest):

@@ -19,10 +19,8 @@
   <license>Apache-2.0</license>
 
   <depend>rclpy</depend>
-  <depend>rosbag2_interfaces</depend>
-  <depend>rosbag2_dynamic_recorder_interfaces</depend>
-  <!-- For dynrec.services: which rosbag2_interfaces definitions the recorder offers depends on
-       the installed rosbag2, and that module resolves it the same way the recorder does. -->
+  <!-- Everything that talks to the recorder goes through dynrec.Recorder, which brings the
+       interface packages with it. -->
   <depend>dynrec</depend>
 
   <exec_depend>ros2launch</exec_depend>

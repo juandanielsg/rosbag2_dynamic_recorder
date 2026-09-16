@@ -114,7 +114,8 @@ unrecorded `tracking_topic_name`, is rejected.
 an existing directory, it uses the next free suffix: `mybag`, then `mybag(1)`.
 
 `~/get_status` reports the bag URI and storage id, recording/paused/snapshot state, start time and
-elapsed seconds, the topic set, messages written, messages lost, split count and bag size.
+elapsed seconds, the topic set, messages written, messages lost, split count, bag size, free space
+on the bag filesystem and whether a low-disk guard stopped the recording.
 `bag_size_bytes` counts flushed bytes, not captured, so it reads 0 early; use `messages_written` to
 tell whether it is recording.
 
@@ -150,10 +151,12 @@ you got there.
 |---|---|
 | `~/events/subscription_change` | `SubscriptionChangeEvent`, also written into the bag |
 | `~/events/pause` | `PauseEvent`, also written into the bag |
+| `~/events/low_disk` | `LowDiskEvent`, also written into the bag |
+| `~/events/bag_size_limit` | `BagSizeLimitEvent`, also written into the bag |
 | `~/events/write_split` | `WriteSplitEvent` |
 | `~/events/messages_lost` | `MessagesLostEvent` |
 
-Writing the first two into the bag is what makes a gap legible; without them it is
+Writing the first four into the bag is what makes a gap legible; without them it is
 indistinguishable from a dropout, a crash or a network fault.
 
 `MessagesLostEvent` is the stock `rosbag2_interfaces` type on Rolling and a field-identical copy from
@@ -167,6 +170,10 @@ losses, so there the count is unknown rather than zero.
   as a crash, a network fault, or the rosbag2 stall that drops about 1.2s from every topic every
   ~31.2s. The stock `Pause` service has empty request and response fields and can carry no reason;
   this event can. Disable with `record_pause_events:=false`.
+- `LowDiskEvent` marks the end of a recording the recorder stopped itself to protect the disk; see
+  [Disk space](#disk-space). Disable the in-bag copy with `record_low_disk_events:=false`.
+- `BagSizeLimitEvent` marks the end of a recording that reached its `max_bag_size` cap; see
+  [Bag size](#bag-size). Disable the in-bag copy with `record_bag_size_limit_events:=false`.
 
 While paused no messages are written, but these events still are; an event suppressed by the pause
 it describes would leave the gap unexplained. `reason` distinguishes `service:pause`,
@@ -176,6 +183,45 @@ it describes would leave the gap unexplained. `reason` distinguishes `service:pa
 `ros2 bag play` replays the sparse channels at full fidelity and `info` and `convert` process them.
 One caveat: `mcap info` averages a channel's rate over the bag, so a topic that ran at 20 Hz and
 then stopped is shown as 4.43 Hz. The recorded events recover the real rate.
+
+## Disk space
+
+`max_bagfile_size` and `max_bagfile_duration` bound the bag, not the disk. Anything else growing on
+the same filesystem -- system logs, core dumps, a second recorder, a software update -- can still
+fill it, and a full disk on an embedded robot also stops logging and DDS shared memory. Set
+`min_free_space` (bytes) or `min_free_space_percent` (percentage of the filesystem); when free
+space falls below either, the recorder logs once, writes a `LowDiskEvent`, and stops. With both
+unset the behaviour is unchanged.
+
+```bash
+ros2 launch rosbag2_dynamic_recorder dynamic_recorder.launch.py \
+  uri:=/tmp/mybag min_free_space:=1073741824     # keep 1 GiB free
+```
+
+The two thresholds combine to the stricter one. The check runs every `storage_check_period`
+seconds (default 1.0). The event is written into the bag before the writer closes, so the recording
+ends with an explanation rather than looking like a crash, and `ros2 dynrec info` reports it.
+`~/get_status` carries `free_space_bytes`, `total_space_bytes` and `stopped_for_low_disk`, so a
+supervisor script can watch the same figures the recorder acts on.
+
+## Bag size
+
+The disk guard bounds what is left on the filesystem; `max_bag_size` bounds the bag itself. It is
+the cap for an unattended recorder: `max_bagfile_size` only rolls to a new file, so a recording left
+running keeps growing across splits. When the bag directory, across every split, grows past
+`max_bag_size` bytes the recorder logs once, writes a `BagSizeLimitEvent`, and stops. `0`, the
+default, disables it.
+
+```bash
+ros2 launch rosbag2_dynamic_recorder dynamic_recorder.launch.py \
+  uri:=/tmp/mybag max_bag_size:=10737418240     # never more than 10 GiB
+```
+
+The check runs on the same `storage_check_period` timer as the disk guard and measures size on
+disk, so the bag can overshoot the cap by one check period's worth of data plus whatever the
+storage plugin had not yet flushed. Treat it as a ceiling with some give, not an exact size.
+`~/get_status` carries `max_bag_size` and `stopped_for_max_bag_size`; `~/record` opens a fresh bag
+with the same cap.
 
 ## Command line
 
@@ -285,8 +331,10 @@ rec.on_status(lambda s: print(s.messages_written))
 rec.wait_for(lambda s: not s.recording, timeout=60)
 ```
 
-Both event streams arrive as one `Event` shape on separate subscriptions, so sort by `event.stamp`
-(the recorder's clock), not arrival order.
+All four event streams arrive as one `Event` shape on separate subscriptions, so sort by
+`event.stamp` (the recorder's clock), not arrival order. The low-disk and bag-size stops are among
+them, so a supervisor can react without polling:
+`rec.on_event(lambda e: e.kind in ('low_disk', 'bag_size_limit') and shutdown())`.
 
 Notes:
 
@@ -347,12 +395,21 @@ debug the network.
 | `storage_config_uri` | *(empty)* | Storage plugin YAML, overlaid on the preset. |
 | `record_subscription_events` | `true` | Write subscription changes into the bag. |
 | `record_pause_events` | `true` | Write pauses and resumes into the bag. |
+| `record_low_disk_events` | `true` | Write a low-disk stop into the bag. |
+| `record_bag_size_limit_events` | `true` | Write a bag-size-limit stop into the bag. |
+| `min_free_space` | `0` | Stop recording below this many bytes free on the bag filesystem; `0` disables. |
+| `min_free_space_percent` | `0.0` | Same, as a percentage of the filesystem; `0.0` disables. The stricter applies. |
+| `max_bag_size` | `0` | Stop recording once the bag directory, across every split, exceeds this many bytes; `0` disables. |
+| `storage_check_period` | `1.0` | Seconds between free-space and bag-size checks when either limit is set. |
 | `messages_lost_report_period` | `5.0` | Seconds between `MessagesLostEvent`. `0` disables. |
 | `status_publish_period` | `1.0` | Seconds between status publications. |
 
-`dynamic_recorder.launch.py` forwards the common arguments. `record_pause_events`,
-`status_publish_period` and the profiles are not exposed, so set them through `params_file:=...`;
-the full launch-argument list is in [docs/install.md](docs/install.md#launch-arguments).
+`dynamic_recorder.launch.py` forwards the common arguments, including `min_free_space`,
+`min_free_space_percent` and `max_bag_size`. `record_pause_events`, `record_low_disk_events`,
+`record_bag_size_limit_events`, `storage_check_period`, `status_publish_period` and the profiles
+are not exposed, so set them
+through `params_file:=...`; the full launch-argument list is in
+[docs/install.md](docs/install.md#launch-arguments).
 
 ## ROS 2 compatibility
 

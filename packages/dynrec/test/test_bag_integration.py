@@ -72,12 +72,15 @@ class Publishers(Node):
         qos = QoSProfile(depth=10, reliability=ReliabilityPolicy.RELIABLE)
         self._pubs = [self.create_publisher(String, topic, qos) for topic in TOPICS]
         self._seq = 0
+        # Appended to every message. Empty by default; the bag-size fixture enlarges it so the bag
+        # grows on disk in seconds rather than minutes, and restores it afterwards.
+        self.payload = ''
         self.create_timer(PERIOD, self._tick)
 
     def _tick(self):
         self._seq += 1
         for pub in self._pubs:
-            pub.publish(String(data=str(self._seq)))
+            pub.publish(String(data=str(self._seq) + self.payload))
 
 
 @pytest.fixture(scope='module')
@@ -399,3 +402,93 @@ class TestWithoutEvents:
         assert pause_sized, 'no pause-sized hole among {}'.format(
             [round(finish - begin, 2) for begin, finish in summary.unexplained_gaps])
         assert any('no pause event explains it' in w for w in summary.warnings)
+
+
+class TestLowDiskStop:
+    """A recording the recorder ended itself to protect the disk.
+
+    The bag has to say why: a recording that simply ends is otherwise indistinguishable from a
+    crash or a power loss, which is the same shape of unexplained end the pause and subscription
+    events exist to account for. The reader must carry the explanation through and must not mistake
+    the event channel for data.
+    """
+
+    @pytest.fixture(scope='class')
+    def low_disk_bag(self):
+        tmp = tempfile.mkdtemp(prefix='dynrec_bag_lowdisk_')
+        bag = os.path.join(tmp, 'bag')
+        # A minimum larger than any real disk, so the guard fires at the first check. A percentage
+        # is not used because a fresh tmpfs can legitimately report ~100% free.
+        proc = run_recorder(bag, 'low_disk_recorder', extra_params=[
+            '-p', 'min_free_space:=9223372036854775807',
+            '-p', 'storage_check_period:=0.2'])
+        try:
+            time.sleep(3.0)
+            check_alive(proc)
+            yield bag
+        finally:
+            stop_recorder(proc)
+            shutil.rmtree(tmp, ignore_errors=True)
+
+    def test_the_stop_is_in_the_bag(self, low_disk_bag):
+        summary = describe(low_disk_bag)
+        assert summary.low_disk_stop is not None, summary.warnings
+        assert summary.low_disk_stop.free_space_bytes > 0
+        assert summary.low_disk_stop.total_space_bytes >= summary.low_disk_stop.free_space_bytes
+
+    def test_the_event_channel_is_not_counted_as_data(self, low_disk_bag):
+        summary = describe(low_disk_bag)
+        assert all('/events/low_disk' not in channel.topic for channel in summary.channels)
+
+    def test_the_report_says_why_the_recording_ended(self, low_disk_bag):
+        summary = describe(low_disk_bag)
+        assert any('free space' in warning for warning in summary.warnings), summary.warnings
+        assert summary_dict(summary)['stopped_for_low_disk'] is True
+
+
+class TestBagSizeLimitStop:
+    """A recording the recorder ended itself because the bag reached its cap.
+
+    Same contract as the low-disk stop, read back through the same path: the event must be carried
+    through, must explain the end of the bag in the report, and must not be mistaken for data.
+    """
+
+    #: Well under one MCAP chunk (~768 KiB), so the first chunk flushed to disk is already past it.
+    LIMIT = 200_000
+
+    @pytest.fixture(scope='class')
+    def size_limited_bag(self, publishers):
+        tmp = tempfile.mkdtemp(prefix='dynrec_bag_sizelimit_')
+        bag = os.path.join(tmp, 'bag')
+        # Size on disk is what the guard measures, and MCAP writes a chunk only once it holds
+        # ~768 KiB. 50 KB per message on two topics at 20 Hz is ~2 MB/s, so the first chunk lands
+        # within a second or two of the recorder subscribing.
+        publishers.payload = 'x' * 50_000
+        proc = run_recorder(bag, 'size_limited_recorder', extra_params=[
+            '-p', 'max_bag_size:={}'.format(self.LIMIT),
+            '-p', 'storage_check_period:=0.2'])
+        try:
+            time.sleep(8.0)
+            check_alive(proc)
+            yield bag
+        finally:
+            publishers.payload = ''
+            stop_recorder(proc)
+            shutil.rmtree(tmp, ignore_errors=True)
+
+    def test_the_stop_is_in_the_bag(self, size_limited_bag):
+        summary = describe(size_limited_bag)
+        assert summary.bag_size_limit_stop is not None, summary.warnings
+        assert summary.bag_size_limit_stop.bag_size_bytes > self.LIMIT
+        assert summary.bag_size_limit_stop.max_bag_size == self.LIMIT
+        assert summary.low_disk_stop is None, 'the wrong guard is being credited'
+
+    def test_the_event_channel_is_not_counted_as_data(self, size_limited_bag):
+        summary = describe(size_limited_bag)
+        assert all('/events/bag_size_limit' not in channel.topic for channel in summary.channels)
+
+    def test_the_report_says_why_the_recording_ended(self, size_limited_bag):
+        summary = describe(size_limited_bag)
+        assert any('size limit' in warning for warning in summary.warnings), summary.warnings
+        assert summary_dict(summary)['stopped_for_max_bag_size'] is True
+        assert summary_dict(summary)['stopped_for_low_disk'] is False

@@ -242,6 +242,16 @@ function health(s) {
              note: "No status update for several seconds." };
   }
   if (!s.recording) {
+    // A stop the recorder chose is the one a reader most needs explained.
+    if (s.stopped_for_low_disk) {
+      return { cls: "bad", text: "Stopped — free space ran low",
+               note: `The bag filesystem fell below the configured minimum (${fmtBytes(s.free_space_bytes)} ` +
+                     `free of ${fmtBytes(s.total_space_bytes)}). Free some space before starting again.` };
+    }
+    if (s.stopped_for_max_bag_size) {
+      return { cls: "warn", text: "Stopped — the bag reached its size limit",
+               note: `max_bag_size is ${fmtBytes(s.max_bag_size)}. Starting again opens a new bag.` };
+    }
     return { cls: "", text: "Stopped",
              note: "The bag is closed. Starting again opens a new one and restores the same " +
                    "topics." };
@@ -440,6 +450,9 @@ function renderTimeline(s) {
       else if (pausedAt !== null) { pauses.push([pausedAt, e.stamp]); pausedAt = null; }
       continue;
     }
+    // A recorder-initiated stop (low disk, bag size) ends every span at once, which the status
+    // already shows; only subscription changes shape the per-topic bars.
+    if (e.kind !== "subscription") continue;
     if (e.action === "subscribed") {
       if (!open.has(e.topic)) open.set(e.topic, e.stamp);
     } else {
@@ -508,8 +521,10 @@ function renderTimeline(s) {
 }
 
 function renderEvents(s) {
-  if (!s.events.length) { $("events").innerHTML = '<li class="empty">Nothing yet.</li>'; return; }
-  $("events").innerHTML = s.events.map((e) => {
+  // The newest few, newest first. history is sorted on the recorder's stamp, oldest first.
+  const feed = (s.history || []).slice(-15).reverse();
+  if (!feed.length) { $("events").innerHTML = '<li class="empty">Nothing yet.</li>'; return; }
+  $("events").innerHTML = feed.map((e) => {
     // A pause has no topic because it stops every one of them. Saying "all topics" is the
     // honest label, and the distinction is the whole reason the two event kinds are separate.
     if (e.kind === "pause") {
@@ -517,6 +532,16 @@ function renderEvents(s) {
     <li>
       <span class="ev-${e.action}">${e.action}</span>
       <span class="name ev-all">all topics</span>
+      <span class="reason">${e.reason}</span>
+    </li>`;
+    }
+    // The recorder stopped itself: free space ran low, or the bag reached its size cap.
+    if (e.kind !== "subscription") {
+      const why = e.kind === "low_disk" ? "low disk" : e.kind === "bag_size_limit" ? "bag size limit" : e.kind;
+      return `
+    <li>
+      <span class="ev-paused">${e.action}</span>
+      <span class="name ev-all">recording (${why})</span>
       <span class="reason">${e.reason}</span>
     </li>`;
     }
@@ -546,8 +571,14 @@ function renderDetail(s) {
     <tr><td>Loss reported by transport</td><td>${fmtInt(s.messages_lost_in_transport)}
       <div class="caveat">Only what the transport chose to report. Observed reading 0 while messages were genuinely absent, so it is not a guarantee.</div></td></tr>
     <tr><td>Files written</td><td>${s.bag_splits + 1}</td></tr>
-    <tr><td>Size on disk</td><td>${fmtBytes(s.bag_size_bytes)}
+    <tr><td>Size on disk</td><td>${fmtBytes(s.bag_size_bytes)}${s.max_bag_size ? ` of ${fmtBytes(s.max_bag_size)} allowed` : ""}
       <div class="caveat">Bytes flushed to disk, not bytes captured. Reads low early on because the writer buffers.</div></td></tr>
+    <tr><td>Free space</td><td>${s.total_space_bytes
+        ? `${fmtBytes(s.free_space_bytes)} of ${fmtBytes(s.total_space_bytes)}`
+        : '<span class="unknown">unknown</span>'}
+      <div class="caveat">${s.min_free_space || s.min_free_space_percent
+        ? `Recording stops below ${[s.min_free_space && fmtBytes(s.min_free_space), s.min_free_space_percent && `${s.min_free_space_percent}%`].filter(Boolean).join(" or ")}.`
+        : "No minimum is configured, so a full disk fails writes rather than stopping the recording."}</div></td></tr>
     <tr><td>Snapshot mode</td><td>${s.snapshot_mode ? "on" : "off"}</td></tr>`;
 }
 
