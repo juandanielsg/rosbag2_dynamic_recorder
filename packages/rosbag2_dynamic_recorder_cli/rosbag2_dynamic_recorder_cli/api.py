@@ -32,6 +32,13 @@ from rosbag2_dynamic_recorder_cli.format import format_topic_group
 #: default: a person at a terminal is running this against a recorder that is already up.
 DEFAULT_SPIN_TIME = 1.0
 
+#: Process exit codes. `EXIT_OK` and `EXIT_ERROR` are the shared contract every recorder verb
+#: honours; `EXIT_UNEXPLAINED_GAPS` is the one extra a script may branch on, returned by `info`
+#: when a bag holds a hole across every channel that nothing accounts for.
+EXIT_OK = 0
+EXIT_ERROR = 1
+EXIT_UNEXPLAINED_GAPS = 2
+
 
 def ambiguous_message(exc):
     """dynrec refuses to guess between recorders; a command line says which flag resolves it."""
@@ -118,10 +125,10 @@ def with_recorder(args, body):
             discovery_timeout=args.spin_time,
         ) as recorder:
             body(recorder)
-        return 0
+        return EXIT_OK
     except AmbiguousRecorder as exc:
         print(ambiguous_message(exc), file=sys.stderr)
-        return 1
+        return EXIT_ERROR
     except DynrecError as exc:
         print(str(exc), file=sys.stderr)
-        return 1
+        return EXIT_ERROR

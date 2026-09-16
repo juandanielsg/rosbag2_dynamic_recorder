@@ -16,6 +16,7 @@ import json
 import os
 import sys
 
+from rosbag2_dynamic_recorder_cli.api import EXIT_ERROR, EXIT_OK, EXIT_UNEXPLAINED_GAPS
 from rosbag2_dynamic_recorder_cli.verb import VerbExtension
 
 
@@ -42,18 +43,18 @@ class InfoVerb(VerbExtension):
             from dynrec.bag import describe, format_summary, summary_dict
         except ImportError as exc:
             print('this verb needs the dynrec package: {}'.format(exc), file=sys.stderr)
-            return 1
+            return EXIT_ERROR
 
         if not os.path.isdir(args.bag):
             print("'{}' is not a directory. Pass the bag directory, not the .mcap file "
                   'inside it.'.format(args.bag), file=sys.stderr)
-            return 1
+            return EXIT_ERROR
 
         try:
             summary = describe(args.bag, storage_id=args.storage_id)
         except Exception as exc:
             print('could not read {}: {}'.format(args.bag, exc), file=sys.stderr)
-            return 1
+            return EXIT_ERROR
 
         if args.json:
             print(json.dumps(summary_dict(summary), indent=2))
@@ -63,4 +64,4 @@ class InfoVerb(VerbExtension):
         # Non-zero when the bag holds a hole nothing accounts for, so a script checking a
         # recording can act on it. A sparse channel is normal and is not an error; a simultaneous
         # unexplained gap across every channel is the one shape that should not be there.
-        return 2 if summary.unexplained_gaps else 0
+        return EXIT_UNEXPLAINED_GAPS if summary.unexplained_gaps else EXIT_OK

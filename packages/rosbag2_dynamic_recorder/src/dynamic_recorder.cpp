@@ -51,6 +51,10 @@ constexpr size_t kEventHistoryDepth = 10;
 /// How many "(N)" suffixes record() tries before giving up on a bag path that already exists.
 constexpr size_t kMaxBagPathSuffix = 10000;
 
+/// Nanoseconds in a second, for converting between builtin_interfaces/Time and the raw
+/// nanosecond count the graph and status use.
+constexpr rcutils_time_point_value_t kNanosecondsPerSecond = 1000000000LL;
+
 /// Verdict for every service that subscribes a batch. Each requested topic lands in exactly one
 /// of the subscribed/unavailable lists, so "nothing subscribed, something unavailable" means the
 /// whole request failed and the caller has to see that; an empty request stays a success, and a
@@ -80,7 +84,8 @@ constexpr int32_t kModeReceiveTime = 2;
 
 rcutils_time_point_value_t to_nanoseconds(const builtin_interfaces::msg::Time & stamp)
 {
-  return static_cast<rcutils_time_point_value_t>(stamp.sec) * 1000000000LL + stamp.nanosec;
+  return static_cast<rcutils_time_point_value_t>(stamp.sec) * kNanosecondsPerSecond +
+         stamp.nanosec;
 }
 
 struct SpaceInfo

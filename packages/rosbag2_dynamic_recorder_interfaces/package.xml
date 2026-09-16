@@ -5,10 +5,11 @@
   <version>0.1.0</version>
   <description>
     Interface definitions for runtime topic management on a rosbag2 recorder: services to
-    subscribe, unsubscribe and replace the recorded topic set, plus a
-    SubscriptionChangeEvent recorded into the bag so that a topic which stops mid-bag is
-    distinguishable from lost data, and a LowDiskEvent so a recording the recorder ended to protect
-    the disk is distinguishable from a crash.
+    subscribe, unsubscribe and replace the recorded topic set, plus the events recorded into the
+    bag so that it explains itself: SubscriptionChangeEvent, so a topic that stops mid-bag is
+    distinguishable from lost data; PauseEvent, so a hole across every topic is distinguishable
+    from a stall; and LowDiskEvent and BagSizeLimitEvent, so a recording the recorder ended itself
+    is distinguishable from a crash.
 
     Field naming and the return_code convention deliberately follow the style of the existing
     rosbag2_interfaces services, so these read as a natural extension of them.

@@ -57,7 +57,7 @@ from rosbag2_dynamic_recorder_interfaces.srv import (
     UnsubscribeTopics,
 )
 
-from dynrec.discovery import choose_recorder, recorder_nodes
+from dynrec.discovery import choose_recorder, node_name, recorder_nodes
 from dynrec.errors import CallFailed, CallTimeout, ServiceUnavailable
 from dynrec.results import EVENT_STREAMS, Profiles, Status, TopicChange
 # Not from rosbag2_interfaces directly: which definition of these the recorder offers depends on
@@ -72,7 +72,7 @@ from dynrec.services import (
     Stop,
     TogglePaused,
 )
-from dynrec.schedule import apply_schedule, parse_time
+from dynrec.schedule import NANOSECONDS_PER_SECOND, apply_schedule, parse_time
 from dynrec.topics import parse_topic_specs, require_a_selection
 
 #: Seconds to wait for a service to appear and then to reply. Generous because adding a topic
@@ -161,30 +161,25 @@ def discover(timeout=DEFAULT_DISCOVERY_TIMEOUT, domain_id=None):
     """
     ros = _Ros(domain_id=domain_id)
     try:
-        return _poll_for_recorders(ros.node, timeout, None)[0]
+        return _poll_for_recorders(ros.node, timeout, None)
     finally:
         ros.close()
 
 
 def _poll_for_recorders(node, timeout, requested):
-    """Wait for the graph to show a recorder. Returns (discovered, deadline_reached).
+    """The recorders on the graph, polled until one (or `requested`) shows up or `timeout` passes.
 
     Polls rather than sleeping a fixed spin time so a recorder that is already up costs ~50ms
     instead of a flat second -- which matters when a script builds a client per operation.
     """
     deadline = time.monotonic() + max(0.0, timeout)
-    discovered = []
     while True:
         discovered = recorder_nodes(node.get_service_names_and_types())
-        if discovered and (requested is None or _matches(discovered, requested)):
-            return discovered, False
+        if discovered and (requested is None or node_name(requested) in discovered):
+            return discovered
         if time.monotonic() >= deadline:
-            return discovered, True
+            return discovered
         time.sleep(0.05)
-
-
-def _matches(discovered, requested):
-    return ('/' + requested.strip('/')) in discovered
 
 
 class Recorder:
@@ -229,7 +224,7 @@ class Recorder:
         self.timeout = timeout
         self._ros = _Ros(node_name=node_name, domain_id=domain_id)
         try:
-            discovered, _ = _poll_for_recorders(self._ros.node, discovery_timeout, recorder)
+            discovered = _poll_for_recorders(self._ros.node, discovery_timeout, recorder)
             #: Node names of every recorder seen while connecting, for error messages and for a
             #: caller that wants to know what else is out there.
             self.discovered = discovered
@@ -429,7 +424,7 @@ class Recorder:
         request.start_time.sec = seconds
         request.start_time.nanosec = nanoseconds
         self._call(Record, 'record', request)
-        return seconds + nanoseconds / 1e9
+        return seconds + nanoseconds / NANOSECONDS_PER_SECOND
 
     # -- watching -------------------------------------------------------------------------
 

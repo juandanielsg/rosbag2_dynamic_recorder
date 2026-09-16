@@ -40,6 +40,11 @@ def recorder_nodes(service_names_and_types):
     return sorted(found)
 
 
+def node_name(requested):
+    """A recorder name as the graph spells it: one leading slash, whatever the caller typed."""
+    return '/' + requested.strip('/')
+
+
 def choose_recorder(discovered, requested=None):
     """Pick the recorder to talk to, or raise explaining why that is not possible.
 
@@ -47,7 +52,7 @@ def choose_recorder(discovered, requested=None):
     and refusing a name that is about to appear would be worse than trying it and timing out.
     """
     if requested:
-        return '/' + requested.strip('/')
+        return node_name(requested)
     if not discovered:
         raise RecorderNotFound(
             'no rosbag2_dynamic_recorder found on the graph. '

@@ -43,6 +43,7 @@ from dataclasses import dataclass, field
 from typing import List, Optional, Tuple
 
 from dynrec.results import EVENT_STREAMS, Event
+from dynrec.schedule import NANOSECONDS_PER_SECOND
 
 #: How much of a simultaneous, unexplained hole is worth mentioning. Below this, ordinary
 #: scheduling jitter across a handful of topics would raise a permanent false alarm.
@@ -210,9 +211,10 @@ def clip_windows(windows, bounds):
 
 def live_seconds(windows, pauses):
     """Seconds covered by `windows` with every paused interval taken out."""
-    total = 0.0
-    for window in merge_windows(windows):
-        total += (window[1] - window[0]) - sum(overlap(window, p) for p in merge_windows(pauses))
+    pauses = merge_windows(pauses)
+    total = sum(
+        (end - start) - sum(overlap((start, end), p) for p in pauses)
+        for start, end in merge_windows(windows))
     return max(0.0, total)
 
 
@@ -309,7 +311,7 @@ def describe(uri, storage_id=''):
             topic, data, _send_ns, nanoseconds = reader.read_next_ext()
         else:
             topic, data, nanoseconds = reader.read_next()
-        seconds = nanoseconds / 1e9
+        seconds = nanoseconds / NANOSECONDS_PER_SECOND
         stamps.setdefault(topic, []).append(seconds)
         parse = event_parsers.get(topic)
         if parse:

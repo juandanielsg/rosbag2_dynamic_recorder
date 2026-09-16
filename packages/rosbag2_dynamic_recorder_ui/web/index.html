@@ -200,6 +200,11 @@ let busy = false;
 // event's own delivery; only a gap wider than that means history was genuinely not observed.
 const UNOBSERVED_SLACK_S = 0.5;
 
+// How long a toast stays up, how many recent events the feed lists, and how often the page polls.
+const TOAST_MS = 4000;
+const EVENT_FEED_LIMIT = 15;
+const POLL_INTERVAL_MS = 1000;
+
 const $ = (id) => document.getElementById(id);
 const fmtInt = (n) => n.toLocaleString();
 const esc = (t) => t.replace(/[&<>"]/g,
@@ -229,7 +234,7 @@ function toast(text) {
   if (!el) { el = document.createElement("div"); el.id = "toast"; document.body.appendChild(el); }
   el.textContent = text;
   clearTimeout(el._t);
-  el._t = setTimeout(() => el.remove(), 4000);
+  el._t = setTimeout(() => el.remove(), TOAST_MS);
 }
 
 // Deliberately conservative. Anything we cannot substantiate is reported as unknown rather than
@@ -525,7 +530,7 @@ function renderTimeline(s) {
 
 function renderEvents(s) {
   // The newest few, newest first. history is sorted on the recorder's stamp, oldest first.
-  const feed = (s.history || []).slice(-15).reverse();
+  const feed = (s.history || []).slice(-EVENT_FEED_LIMIT).reverse();
   if (!feed.length) { $("events").innerHTML = '<li class="empty">Nothing yet.</li>'; return; }
   $("events").innerHTML = feed.map((e) => {
     // A pause has no topic because it stops every one of them. Saying "all topics" is the
@@ -695,7 +700,7 @@ $("btn-apply").onclick = async () => {
 };
 
 poll();
-setInterval(poll, 1000);
+setInterval(poll, POLL_INTERVAL_MS);
 </script>
 </body>
 </html>

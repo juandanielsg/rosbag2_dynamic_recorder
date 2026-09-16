@@ -29,17 +29,19 @@ any object carrying the right fields.
 from dataclasses import asdict, dataclass, field
 from typing import Dict, List, Optional
 
+from dynrec.schedule import NANOSECONDS_PER_SECOND
+
 #: Maps the uint8 action constants onto words, because a script comparing against 0 and 1 is one
 #: constant rename away from silently inverting.
 SUBSCRIPTION_ACTIONS = {0: 'subscribed', 1: 'unsubscribed'}
 PAUSE_ACTIONS = {0: 'paused', 1: 'resumed'}
-LOW_DISK_ACTIONS = {0: 'stopped'}
-BAG_SIZE_LIMIT_ACTIONS = {0: 'stopped'}
+#: Shared by LowDiskEvent and BagSizeLimitEvent: a self-inflicted stop is their only action.
+STOP_ACTIONS = {0: 'stopped'}
 
 
 def _stamp_seconds(stamp):
     """A builtin_interfaces/Time as epoch seconds on the recorder's clock."""
-    return stamp.sec + stamp.nanosec / 1e9
+    return stamp.sec + stamp.nanosec / NANOSECONDS_PER_SECOND
 
 
 @dataclass(frozen=True)
@@ -271,7 +273,7 @@ class Event:
     def from_low_disk_msg(cls, msg):
         return cls(
             kind='low_disk',
-            action=LOW_DISK_ACTIONS.get(msg.action, str(msg.action)),
+            action=STOP_ACTIONS.get(msg.action, str(msg.action)),
             stamp=_stamp_seconds(msg.stamp),
             reason=msg.reason,
             node_name=msg.node_name,
@@ -283,7 +285,7 @@ class Event:
     def from_bag_size_limit_msg(cls, msg):
         return cls(
             kind='bag_size_limit',
-            action=BAG_SIZE_LIMIT_ACTIONS.get(msg.action, str(msg.action)),
+            action=STOP_ACTIONS.get(msg.action, str(msg.action)),
             stamp=_stamp_seconds(msg.stamp),
             reason=msg.reason,
             node_name=msg.node_name,

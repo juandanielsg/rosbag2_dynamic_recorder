@@ -38,7 +38,9 @@ TIME_MODES = {
 _RELATIVE = re.compile(r'^\+(\d+(?:\.\d+)?)([smh]?)$')
 _WALL_CLOCK = re.compile(r'^\d{1,2}:\d{2}(:\d{2})?$')
 
-_NANOSECONDS_PER_SECOND = 1_000_000_000
+#: One second in nanoseconds. Shared by every conversion between the two, inside and outside this
+#: module, so the scale is written once.
+NANOSECONDS_PER_SECOND = 1_000_000_000
 _UNIT_SECONDS = {'': 1.0, 's': 1.0, 'm': 60.0, 'h': 3600.0}
 
 
@@ -116,12 +118,12 @@ def _next_wall_clock(text, now):
 
 def _split(seconds):
     whole = int(seconds)
-    nanoseconds = int(round((seconds - whole) * _NANOSECONDS_PER_SECOND))
-    # A fraction within half a nanosecond of the next second rounds to 1e9, which is not a legal
-    # nanosec field. Rare, but it would surface as an opaque message-assignment error.
-    if nanoseconds >= _NANOSECONDS_PER_SECOND:
+    nanoseconds = int(round((seconds - whole) * NANOSECONDS_PER_SECOND))
+    # A fraction within half a nanosecond of the next second rounds to a full second, which is not
+    # a legal nanosec field. Rare, but it would surface as an opaque message-assignment error.
+    if nanoseconds >= NANOSECONDS_PER_SECOND:
         whole += 1
-        nanoseconds -= _NANOSECONDS_PER_SECOND
+        nanoseconds -= NANOSECONDS_PER_SECOND
     return whole, nanoseconds
 
 
@@ -153,4 +155,4 @@ def apply_schedule(request, at, mode, tracking_topic, time_field, mode_field):
     stamp = getattr(request, time_field)
     stamp.sec = seconds
     stamp.nanosec = nanoseconds
-    return seconds + nanoseconds / _NANOSECONDS_PER_SECOND
+    return seconds + nanoseconds / NANOSECONDS_PER_SECOND

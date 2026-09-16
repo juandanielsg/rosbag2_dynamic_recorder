@@ -30,6 +30,9 @@ Thumbs.db
 # Local-only working notes: upstream correspondence drafts, not part of the project.
 /private/
 
+# Local codebase-composition map, a convenience for working in the tree, not a deliverable.
+/CODEBASE.md
+
 # Sphinx build output
 docs/_build/
 

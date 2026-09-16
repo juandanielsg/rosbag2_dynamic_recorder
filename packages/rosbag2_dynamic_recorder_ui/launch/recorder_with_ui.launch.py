@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+
 """Recorder plus browser UI, in one command.
 
     ros2 launch rosbag2_dynamic_recorder_ui recorder_with_ui.launch.py uri:=/tmp/mybag
@@ -20,137 +21,44 @@ Then open http://localhost:8088. This is the intended entry point for anyone who
 learn service call syntax to record a bag: start it with no topics at all and pick them in the
 browser.
 
-To offer named profiles, point params_file at a YAML like
+Every argument of the recorder's own launch file is accepted here unchanged -- it is included,
+not copied, so a parameter added there reaches this entry point without a second table to keep
+in step. To offer named profiles, point params_file at a YAML like
 rosbag2_dynamic_recorder/config/profiles.example.yaml.
 """
 
-import ast
-
 from launch import LaunchDescription
-from launch.actions import DeclareLaunchArgument, OpaqueFunction
-from launch.substitutions import LaunchConfiguration
+from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription
+from launch.launch_description_sources import PythonLaunchDescriptionSource
+from launch.substitutions import LaunchConfiguration, PathJoinSubstitution
 from launch_ros.actions import Node
+from launch_ros.parameter_descriptions import ParameterValue
+from launch_ros.substitutions import FindPackageShare
 
 from rosbag2_dynamic_recorder_ui import DEFAULT_PORT, DEFAULT_RECORDER_NODE
 
-ARGUMENTS = [
-    ('uri', 'dynamic_bag', 'Output bag path.'),
-    ('topics', '[]', 'Topics to record at startup, as a YAML list. May be empty; pick in the UI.'),
-    ('storage_id', 'mcap', 'Storage plugin.'),
-    ('serialization_format', 'cdr', 'Message serialization format.'),
-    ('start_paused', 'false', 'Start with recording paused.'),
-    ('snapshot_mode', 'false', 'Buffer in memory and only write on request.'),
-    ('max_cache_size', str(100 * 1024 * 1024),  # the node's own default, 100 MiB
-     'Writer cache in bytes. snapshot_mode needs this or max_cache_duration to be > 0.'),
-    ('max_cache_duration', '0',
-     'Writer cache bound in seconds; 0 for none. Combines with max_cache_size. A bound an '
-     'operator can reason about: at most this much recording is at risk if the process dies.'),
-    ('max_bagfile_size', '0', 'Split the bag when a file reaches this many bytes; 0 never.'),
-    ('max_bagfile_duration', '0', 'Split the bag every this many seconds; 0 never.'),
-    ('storage_preset_profile', '',
-     'Storage plugin preset. For mcap: none, fastwrite, zstd_fast, zstd_small. fastwrite is '
-     'the one for a weak CPU; the zstd presets trade CPU for disk bandwidth.'),
-    ('storage_config_uri', '', 'Path to a storage-plugin YAML, overlaid on the preset.'),
-    ('record_subscription_events', 'true',
-     'Record SubscriptionChangeEvent into the bag, so sparse channels explain themselves.'),
-    ('min_free_space', '0',
-     'Stop recording when free space on the bag filesystem falls below this many bytes; '
-     '0 disables. Protects the disk, not the bag: logs or a second recorder can fill it.'),
-    ('min_free_space_percent', '0.0',
-     'Same, as a percentage of the filesystem; 0.0 disables. When both are set the stricter one '
-     'applies.'),
-    ('max_bag_size', '0',
-     'Stop recording when the bag directory, across every split, grows past this many bytes; '
-     '0 disables. A cap on the recording where max_bagfile_size only rolls to a new file.'),
-    ('messages_lost_report_period', '5.0',
-     'Seconds between MessagesLostEvent publications. 0 disables reporting.'),
-    ('params_file', '', 'Optional YAML of extra recorder parameters, e.g. recording profiles.'),
-    ('port', str(DEFAULT_PORT), 'Port for the browser UI.'),
-    ('bind', '127.0.0.1',
-     'Address the UI listens on. Loopback by default because the UI has no authentication; use 0.0.0.0 only on a trusted network.'),
-]
-
-
-def recorder_parameters(context):
-    """Build the recorder's parameter dict, omitting `topics` when it is empty.
-
-    An empty list cannot survive the round trip through a launch parameters file: it reaches rcl
-    as "contains no value" and the node aborts with InvalidParameterValueException. Since the node
-    already defaults to recording nothing, the fix is not to pass the key at all -- and starting
-    with no topics is the normal case when they will be picked in the UI.
-
-    Duplicated from the recorder package's own launch file rather than imported: that package is
-    ament_cmake and exposes no Python module to import from.
-    """
-    raw = LaunchConfiguration('topics').perform(context).strip()
-    topics = []
-    if raw:
-        try:
-            # literal_eval, not eval: this is a command-line string with no reason to execute it.
-            value = ast.literal_eval(raw)
-        except (ValueError, SyntaxError) as exc:
-            raise RuntimeError(f"could not parse topics:={raw!r} as a list: {exc}") from exc
-        topics = [str(v) for v in ([value] if isinstance(value, str) else value)]
-
-    params = {
-        'uri': LaunchConfiguration('uri').perform(context),
-        'storage_id': LaunchConfiguration('storage_id').perform(context),
-        'serialization_format': LaunchConfiguration('serialization_format').perform(context),
-        'start_paused': LaunchConfiguration('start_paused').perform(context) == 'true',
-        'snapshot_mode': LaunchConfiguration('snapshot_mode').perform(context) == 'true',
-        'max_cache_size': int(LaunchConfiguration('max_cache_size').perform(context)),
-        'max_cache_duration': int(LaunchConfiguration('max_cache_duration').perform(context)),
-        'max_bagfile_size': int(LaunchConfiguration('max_bagfile_size').perform(context)),
-        'max_bagfile_duration':
-            int(LaunchConfiguration('max_bagfile_duration').perform(context)),
-        'storage_preset_profile':
-            LaunchConfiguration('storage_preset_profile').perform(context),
-        'storage_config_uri': LaunchConfiguration('storage_config_uri').perform(context),
-        'record_subscription_events':
-            LaunchConfiguration('record_subscription_events').perform(context) == 'true',
-        'min_free_space': int(LaunchConfiguration('min_free_space').perform(context)),
-        'min_free_space_percent':
-            float(LaunchConfiguration('min_free_space_percent').perform(context)),
-        'max_bag_size': int(LaunchConfiguration('max_bag_size').perform(context)),
-        'messages_lost_report_period':
-            float(LaunchConfiguration('messages_lost_report_period').perform(context)),
-    }
-    if topics:
-        params['topics'] = topics
-    return params
-
-
-def _setup(context, *_args, **_kwargs):
-    parameters = [recorder_parameters(context)]
-    params_file = LaunchConfiguration('params_file').perform(context).strip()
-    if params_file:
-        parameters.append(params_file)
-
-    return [
-        Node(
-            package='rosbag2_dynamic_recorder',
-            executable='dynamic_recorder',
-            name=DEFAULT_RECORDER_NODE.lstrip('/'),
-            output='screen',
-            parameters=parameters,
-        ),
-        Node(
-            package='rosbag2_dynamic_recorder_ui',
-            executable='ui_node',
-            name='rosbag2_dynamic_recorder_ui',
-            output='screen',
-            parameters=[{
-                'port': int(LaunchConfiguration('port').perform(context)),
-                'bind': LaunchConfiguration('bind').perform(context),
-                'recorder_node': DEFAULT_RECORDER_NODE,
-            }],
-        ),
-    ]
-
 
 def generate_launch_description():
-    return LaunchDescription(
-        [DeclareLaunchArgument(name, default_value=default, description=desc)
-         for name, default, desc in ARGUMENTS]
-        + [OpaqueFunction(function=_setup)]
+    recorder = IncludeLaunchDescription(PythonLaunchDescriptionSource(PathJoinSubstitution(
+        [FindPackageShare('rosbag2_dynamic_recorder'), 'launch', 'dynamic_recorder.launch.py'])))
+    ui = Node(
+        package='rosbag2_dynamic_recorder_ui',
+        executable='ui_node',
+        name='rosbag2_dynamic_recorder_ui',
+        output='screen',
+        parameters=[{
+            'port': ParameterValue(LaunchConfiguration('port'), value_type=int),
+            'bind': ParameterValue(LaunchConfiguration('bind'), value_type=str),
+            'recorder_node': DEFAULT_RECORDER_NODE,
+        }],
     )
+    return LaunchDescription([
+        DeclareLaunchArgument(
+            'port', default_value=str(DEFAULT_PORT), description='Port for the browser UI.'),
+        DeclareLaunchArgument(
+            'bind', default_value='127.0.0.1',
+            description='Address the UI listens on. Loopback by default because the UI has no '
+                        'authentication; use 0.0.0.0 only on a trusted network.'),
+        recorder,
+        ui,
+    ])

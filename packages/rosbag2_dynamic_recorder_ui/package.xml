@@ -24,6 +24,7 @@
   <depend>dynrec</depend>
 
   <exec_depend>ros2launch</exec_depend>
+  <exec_depend>rosbag2_dynamic_recorder</exec_depend>
 
   <test_depend>ament_copyright</test_depend>
   <test_depend>python3-pytest</test_depend>
