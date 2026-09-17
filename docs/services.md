@@ -98,6 +98,23 @@ to a topic that is not being recorded would wait forever.
 `~/stop` clears a queued `resume` or `split_bagfile`, so it cannot fire against the next bag. A
 queued `record` is not cleared and will still fire.
 
+## Simulation time
+
+With `use_sim_time:=true` the recorder behaves as `ros2 bag record --use-sim-time` does, and then
+some, because everything it writes has to agree with itself:
+
+- Messages are stamped with the node clock, driven by `/clock`, instead of the middleware's receive
+  time, so the bag's timeline is the simulation's: `ros2 bag info`, playback and `describe()` all
+  measure in simulated seconds, and a paused simulation produces a paused bag. The send stamp stays
+  the middleware's wall-clock one, as upstream leaves it. The recorder's own events were always on
+  the node clock, so the two timelines in one bag now match.
+- Nothing is opened or subscribed until `/clock` has been heard: a node clock reads zero until then,
+  and a bag opened on it would begin in 1970. The recorder is up and answering in the meantime,
+  `~/status` says `waiting_for_clock`, and a call that needs an open bag -- adding a topic,
+  `~/record` -- is refused with a message that says why rather than left to time out.
+- Node-time schedules (`resume`, `split_bagfile`, `record` with a future stamp) run on the node
+  clock too, so they keep to simulated time when the simulation runs slow or stops.
+
 ## Status
 
 `~/get_status` is the one-shot form; `~/status` is the same message published periodically, on every
@@ -151,6 +168,11 @@ A few fields need reading carefully:
 : The configured cap on the bag directory in bytes (0 when unset), and whether the recorder stopped
   itself for exceeding it. Compared against `bag_size_bytes`, so it inherits that field's caveat.
   Cleared when `~/record` opens a new bag.
+
+`use_sim_time`, `waiting_for_clock`
+: Whether messages are stamped on the `/clock`-driven node clock, and whether the recorder is still
+  waiting for that clock's first message. While it waits no bag is open and every call that needs
+  one is refused with a message saying so; see [Simulation time](#simulation-time).
 
 The remaining fields are literal: `recording`, `paused`, `snapshot_mode`, `elapsed_seconds`,
 `recording_started`, `subscribed_topics`, `bag_splits` (times the file has rolled over) and
@@ -231,6 +253,7 @@ A worked example using the TurtleBot 4 simulator's topics ships at
 | `serialization_format` | `cdr` | Message serialization format. |
 | `topics` | `[]` | Topics to subscribe at startup. |
 | `start_paused` | `false` | Start with recording paused. |
+| `use_sim_time` | `false` | Stamp messages on the node clock driven by `/clock`, and open nothing until it has started. See [Simulation time](#simulation-time). |
 | `snapshot_mode` | `false` | Buffer in memory, write only on `~/snapshot`. |
 | `max_cache_size` | `104857600` | Writer cache in bytes. `snapshot_mode` needs this or `max_cache_duration` > 0. |
 | `max_cache_duration` | `0` | Writer cache bound in seconds; `0` for none. Combines with `max_cache_size`. Rolling only: refused at startup elsewhere. |
@@ -261,7 +284,7 @@ written synchronously from its callback, which is what makes publishers overwrit
 history unseen — the recorder warns once at startup if you do that.
 
 These are node parameters. The launch files forward only some of them: `uri`, `storage_id`,
-`serialization_format`, `topics`, `start_paused`, `snapshot_mode`, the six storage settings,
+`serialization_format`, `topics`, `start_paused`, `use_sim_time`, `snapshot_mode`, the six storage settings,
 `record_subscription_events`, `messages_lost_report_period`, `min_free_space`,
 `min_free_space_percent` and `max_bag_size`. Set `record_pause_events`, `record_low_disk_events`,
 `record_bag_size_limit_events`, `storage_check_period`, `status_publish_period`, `profile_names`

@@ -81,6 +81,8 @@ SAMPLE_STATE = {
     "stopped_for_low_disk": False,
     "max_bag_size": 0,
     "stopped_for_max_bag_size": False,
+    "use_sim_time": False,
+    "waiting_for_clock": False,
     "profiles": [
         {"name": "light", "topics": ["/spike/a"]},
         {"name": "everything", "topics": ["/spike/a", "/spike/b", "/spike/c"]},

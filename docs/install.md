@@ -40,6 +40,7 @@ ros2 launch rosbag2_dynamic_recorder dynamic_recorder.launch.py \
 | `serialization_format` | `cdr` | Message serialization format. |
 | `topics` | `[]` | Topics to record at startup, as a YAML list. May be empty. |
 | `start_paused` | `false` | Start with recording paused. |
+| `use_sim_time` | `false` | Stamp messages on the node clock driven by `/clock`, and open nothing until it has started. |
 | `snapshot_mode` | `false` | Buffer in memory and write only on `~/snapshot`. |
 | `max_cache_size` | `104857600` | Writer cache in bytes. `snapshot_mode` needs this or `max_cache_duration` > 0. |
 | `max_cache_duration` | `0` | Writer cache bound in seconds; `0` for none. Combines with `max_cache_size`. Rolling only. |

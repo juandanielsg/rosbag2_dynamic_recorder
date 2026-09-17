@@ -83,6 +83,8 @@ def format_topic_group(label, topics):
 def state_word(status):
     """One word for what the recorder is doing, plus any qualifier worth seeing."""
     if not status.recording:
+        if status.waiting_for_clock:
+            return 'waiting for /clock (use_sim_time is set; no bag is open until it arrives)'
         # A stop the recorder chose is the one a reader most needs explained.
         if status.stopped_for_low_disk:
             return 'stopped (free space on the bag filesystem fell below the minimum)'

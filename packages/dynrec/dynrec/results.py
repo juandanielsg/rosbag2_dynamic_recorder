@@ -100,6 +100,12 @@ class Status:
     #: True when the recorder stopped itself because the bag grew past `max_bag_size`. Cleared when
     #: `~/record` opens a new bag.
     stopped_for_max_bag_size: bool = False
+    #: True when messages are stamped with the node clock driven by `/clock`, so the bag's
+    #: timeline is the simulation's rather than the wall clock's.
+    use_sim_time: bool = False
+    #: True under `use_sim_time` until the first `/clock` message: no bag is open yet, and every
+    #: call that needs one is refused until then.
+    waiting_for_clock: bool = False
 
     @classmethod
     def from_msg(cls, msg, recorder=''):
@@ -131,6 +137,8 @@ class Status:
             stopped_for_low_disk=bool(msg.stopped_for_low_disk),
             max_bag_size=msg.max_bag_size,
             stopped_for_max_bag_size=bool(msg.stopped_for_max_bag_size),
+            use_sim_time=bool(msg.use_sim_time),
+            waiting_for_clock=bool(msg.waiting_for_clock),
         )
 
     def as_dict(self):

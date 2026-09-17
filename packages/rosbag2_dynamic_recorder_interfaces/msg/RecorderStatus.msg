@@ -124,3 +124,11 @@ uint64 max_bag_size
 # True when the recorder stopped itself because the bag grew past max_bag_size. Cleared when
 # ~/record opens a new bag.
 bool stopped_for_max_bag_size
+
+# True when the recorder stamps messages with the node clock driven by /clock rather than with the
+# middleware's receive time, so the bag's timeline is the simulation's.
+bool use_sim_time
+
+# True under use_sim_time until the first /clock message arrives. No bag is open and every call
+# that needs one is refused until then, so a recorder that seems idle after launch is not stuck.
+bool waiting_for_clock

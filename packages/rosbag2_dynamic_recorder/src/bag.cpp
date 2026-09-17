@@ -22,7 +22,10 @@ namespace rosbag2_dynamic_recorder
 {
 
 Bag::Bag(rclcpp::Logger logger, rclcpp::Clock::SharedPtr clock)
-: logger_(std::move(logger)), clock_(std::move(clock))
+: logger_(std::move(logger)), clock_(std::move(clock)),
+  // On the node's clock type from the start: before the first open it is still subtracted from
+  // now() for the status, and rclcpp refuses arithmetic across clock types.
+  opened_at_(int64_t{0}, clock_->get_clock_type())
 {
 }
 

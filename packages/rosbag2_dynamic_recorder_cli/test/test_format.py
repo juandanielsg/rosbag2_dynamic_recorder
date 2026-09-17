@@ -63,6 +63,8 @@ def _status(**overrides):
         stopped_for_low_disk=False,
         max_bag_size=0,
         stopped_for_max_bag_size=False,
+        use_sim_time=False,
+        waiting_for_clock=False,
     )
     base.update(overrides)
     base.setdefault('recording_started', SimpleNamespace(sec=1788500000, nanosec=0))
@@ -124,6 +126,10 @@ def test_a_self_inflicted_stop_says_why():
     """After the recorder stops itself, 'stopped' alone is the one answer a reader cannot use."""
     assert 'free space' in state_word(_status(recording=False, stopped_for_low_disk=True))
     assert 'max_bag_size' in state_word(_status(recording=False, stopped_for_max_bag_size=True))
+
+
+def test_waiting_for_the_sim_clock_is_not_reported_as_stopped():
+    assert '/clock' in state_word(_status(recording=False, waiting_for_clock=True))
 
 
 def test_free_space_is_unknown_when_the_filesystem_could_not_be_read():

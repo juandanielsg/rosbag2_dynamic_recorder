@@ -137,6 +137,7 @@ RecorderConfig declare_parameters(rclcpp::Node & node)
     node.declare_parameter<double>("messages_lost_report_period", 5.0);
   c.status_publish_period_s = node.declare_parameter<double>("status_publish_period", 1.0);
   c.start_paused = node.declare_parameter<bool>("start_paused", false);
+  c.use_sim_time = node.get_parameter("use_sim_time").as_bool();
   c.initial_topics = node.declare_parameter<std::vector<std::string>>(
     "topics", std::vector<std::string>{});
   c.profiles = declare_profiles(node);

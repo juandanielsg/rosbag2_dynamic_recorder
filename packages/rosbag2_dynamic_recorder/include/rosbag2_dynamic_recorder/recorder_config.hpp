@@ -42,6 +42,10 @@ struct RecorderConfig
   int64_t max_cache_duration{0};
   bool snapshot_mode{false};
   bool start_paused{false};
+  /// rclcpp's own parameter, read rather than declared. When set, messages are stamped with the
+  /// node clock instead of the middleware's receive time, so the bag's timeline is the
+  /// simulation's, and nothing is opened or subscribed until /clock has been heard.
+  bool use_sim_time{false};
   std::vector<std::string> initial_topics;
   /// In declaration order, each topic list sorted and deduplicated.
   std::vector<std::pair<std::string, std::vector<std::string>>> profiles;

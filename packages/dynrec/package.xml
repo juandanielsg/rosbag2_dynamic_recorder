@@ -35,6 +35,7 @@
   <test_depend>ament_copyright</test_depend>
   <test_depend>python3-pytest</test_depend>
   <test_depend>rosbag2_dynamic_recorder</test_depend>
+  <test_depend>rosgraph_msgs</test_depend>
   <test_depend>std_msgs</test_depend>
 
   <export>

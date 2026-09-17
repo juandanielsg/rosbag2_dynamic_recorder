@@ -57,6 +57,8 @@ constexpr size_t kMaxBagPathSuffix = 10000;
 /// Nanoseconds in a second, for converting between builtin_interfaces/Time and the raw
 /// nanosecond count the graph and status use.
 constexpr rcutils_time_point_value_t kNanosecondsPerSecond = 1000000000LL;
+/// How often to look for the first /clock under use_sim_time. Only the startup delay rides on it.
+constexpr auto kClockPollPeriod = std::chrono::milliseconds(50);
 
 /// Verdict for every service that subscribes a batch. Each requested topic lands in exactly one
 /// of the subscribed/unavailable lists, so "nothing subscribed, something unavailable" means the
@@ -81,26 +83,14 @@ rcutils_time_point_value_t to_nanoseconds(const builtin_interfaces::msg::Time & 
 }  // namespace
 
 DynamicRecorder::DynamicRecorder(const rclcpp::NodeOptions & options)
-: rclcpp::Node("rosbag2_dynamic_recorder", options), bag_(get_logger(), get_clock())
+: rclcpp::Node("rosbag2_dynamic_recorder", options), clock_(get_clock()),
+  bag_(get_logger(), clock_)
 {
   config_ = rosbag2_dynamic_recorder::declare_parameters(*this);
   storage_guard_ = std::make_unique<StorageGuard>(StorageGuard::Limits{
       config_.min_free_space, config_.min_free_space_percent, config_.max_bag_size});
   storage_options_ = config_.storage;
   paused_ = config_.start_paused;
-
-  const auto open_error =
-    bag_.open(storage_options_, config_.converter, writer_event_callbacks(), now());
-  if (!open_error.empty()) {
-    throw std::runtime_error(open_error);
-  }
-  RCLCPP_INFO(get_logger(), "Recording to '%s' (storage_id=%s%s%s)%s%s",
-    storage_options_.uri.c_str(),
-    storage_options_.storage_id.c_str(),
-    storage_options_.storage_preset_profile.empty() ? "" : ", preset=",
-    storage_options_.storage_preset_profile.c_str(),
-    config_.snapshot_mode ? " [snapshot mode]" : "",
-    paused_.load() ? " [started paused]" : "");
   if (!config_.cache_enabled()) {
     // Synchronous writes hold the subscription callback for the duration of each disk write.
     // That is exactly the condition under which publishers overwrite their own history unseen,
@@ -206,6 +196,44 @@ DynamicRecorder::DynamicRecorder(const rclcpp::NodeOptions & options)
       config_.storage_check_period_s);
   }
 
+  if (!waiting_for_clock()) {
+    start();
+    return;
+  }
+  // The node clock reads 0 until the first /clock message, and the executor that delivers it is
+  // not spinning yet, so the wait has to be a timer rather than a loop here. Until it fires the
+  // recorder is alive and answering, with the status saying what it is waiting for.
+  RCLCPP_INFO(get_logger(), "use_sim_time is set: waiting for /clock before opening the bag");
+  clock_wait_timer_ = create_wall_timer(
+    kClockPollPeriod,
+    [this]() {
+      if (waiting_for_clock()) {
+        return;
+      }
+      clock_wait_timer_->cancel();
+      start();
+    },
+    service_callback_group_);
+}
+
+void DynamicRecorder::start()
+{
+  const auto open_error =
+    bag_.open(storage_options_, config_.converter, writer_event_callbacks(), now());
+  if (!open_error.empty()) {
+    // Out of the constructor this ends the process from a timer callback, which is still the
+    // contract: a bad launch fails at startup, not after the first bag is open.
+    throw std::runtime_error(open_error);
+  }
+  RCLCPP_INFO(get_logger(), "Recording to '%s' (storage_id=%s%s%s)%s%s%s",
+    storage_options_.uri.c_str(),
+    storage_options_.storage_id.c_str(),
+    storage_options_.storage_preset_profile.empty() ? "" : ", preset=",
+    storage_options_.storage_preset_profile.c_str(),
+    config_.snapshot_mode ? " [snapshot mode]" : "",
+    paused_.load() ? " [started paused]" : "",
+    config_.use_sim_time ? " [sim time]" : "");
+
   // Before the initial subscriptions, so a bag started with start_paused opens with the reason
   // its head is empty rather than with channels that appear to fail immediately.
   emit_initial_pause_state();
@@ -218,6 +246,7 @@ DynamicRecorder::DynamicRecorder(const rclcpp::NodeOptions & options)
       RCLCPP_WARN(get_logger(), "Initial topic '%s' unavailable at startup", topic.c_str());
     }
   }
+  publish_status();
 }
 
 DynamicRecorder::~DynamicRecorder()
@@ -363,28 +392,26 @@ bool DynamicRecorder::subscribe_topic(
       if (!enabled->load(std::memory_order_acquire)) {
         return;
       }
-      rcutils_time_point_value_t recv_timestamp{0};
-      rcutils_time_point_value_t send_timestamp{0};
+      // Under sim time the receive stamp is the node clock, so the bag's timeline is the
+      // simulation's; the middleware's send stamp stays wall time, as upstream leaves it too.
+      const auto & rmw_info = info.get_rmw_message_info();
+      bool stamp_with_node_clock = config_.use_sim_time;
+      rcutils_time_point_value_t send_timestamp = rmw_info.source_timestamp;
+#ifdef _WIN32
       // Ported from rosbag2_transport::RecorderImpl::create_subscription(): rmw_connextdds on
       // Windows does not provide usable received/source timestamps.
-#ifdef _WIN32
       if (std::string(rmw_get_implementation_identifier()).find("rmw_connextdds") !=
         std::string::npos)
       {
-        recv_timestamp = now().nanoseconds();
+        stamp_with_node_clock = true;
         send_timestamp = 0;
-      } else {
-        recv_timestamp = info.get_rmw_message_info().received_timestamp;
-        send_timestamp = info.get_rmw_message_info().source_timestamp;
       }
-#else
-      recv_timestamp = info.get_rmw_message_info().received_timestamp;
-      send_timestamp = info.get_rmw_message_info().source_timestamp;
 #endif
+      const rcutils_time_point_value_t recv_timestamp =
+        stamp_with_node_clock ? now().nanoseconds() : rmw_info.received_timestamp;
 
       // Sequence tracking happens before the pause gate on purpose: while paused we still
       // receive messages and simply decline to write them, so they are not missing.
-      const auto & rmw_info = info.get_rmw_message_info();
       const auto sequence = rmw_info.publication_sequence_number;
       if (sequence != RMW_MESSAGE_INFO_SEQUENCE_NUMBER_UNSUPPORTED) {
         losses_.note_sequence(
@@ -591,8 +618,7 @@ void DynamicRecorder::handle_subscribe_topics(
     // meaning is that they are absent from the graph or ambiguous. The real reason is
     // that there is no open bag to record into.
     response->return_code = kReturnError;
-    response->error_string =
-      "recorder is stopped; call ~/record to open a new bag first";
+    response->error_string = stopped_reason();
     return;
   }
   current_reason_ = "service:subscribe_topics";
@@ -679,8 +705,7 @@ void DynamicRecorder::handle_set_topics(
     // meaning is that they are absent from the graph or ambiguous. The real reason is
     // that there is no open bag to record into.
     response->return_code = kReturnError;
-    response->error_string =
-      "recorder is stopped; call ~/record to open a new bag first";
+    response->error_string = stopped_reason();
     return;
   }
   current_reason_ = "service:set_topics";
@@ -950,7 +975,7 @@ void DynamicRecorder::handle_resume(
   // because it calls resume()/pause() directly rather than through this handler.
   if (!is_recording()) {
     response->return_code = Resume::Response::RETURN_CODE_RESUME_FAILED;
-    response->error_string = "recorder is stopped; call ~/record to open a new bag first";
+    response->error_string = stopped_reason();
     return;
   }
   const auto outcome = schedule_or_run(
@@ -1112,6 +1137,8 @@ DynamicRecorder::RecorderStatus DynamicRecorder::build_status() const
   status.stopped_for_low_disk = stopped_for_low_disk_.load();
   status.max_bag_size = config_.max_bag_size;
   status.stopped_for_max_bag_size = stopped_for_max_bag_size_.load();
+  status.use_sim_time = config_.use_sim_time;
+  status.waiting_for_clock = waiting_for_clock();
   return status;
 }
 
@@ -1132,6 +1159,18 @@ void DynamicRecorder::publish_status()
 bool DynamicRecorder::is_recording() const
 {
   return bag_.is_open();
+}
+
+bool DynamicRecorder::waiting_for_clock() const
+{
+  return config_.use_sim_time && !clock_->started();
+}
+
+std::string DynamicRecorder::stopped_reason() const
+{
+  return waiting_for_clock() ?
+         "waiting for /clock: use_sim_time is set and nothing has been published on it yet" :
+         "recorder is stopped; call ~/record to open a new bag first";
 }
 
 bool DynamicRecorder::record(const std::string & uri)
@@ -1216,6 +1255,12 @@ void DynamicRecorder::handle_record(
     response->error_string = "already recording";
     return;
   }
+  if (waiting_for_clock()) {
+    // A bag opened now would start at time 0 and be stamped from there.
+    response->return_code = kReturnError;
+    response->error_string = stopped_reason();
+    return;
+  }
 
   // Record carries no mode field upstream, only a timestamp, so it is node-time by definition.
   const auto at_ns = to_nanoseconds(request->start_time);
@@ -1287,7 +1332,7 @@ void DynamicRecorder::handle_set_profile(
 {
   if (!is_recording()) {
     response->return_code = kReturnError;
-    response->error_string = "recorder is stopped; call ~/record to open a new bag first";
+    response->error_string = stopped_reason();
     return;
   }
   current_reason_ = "service:set_profile:" + request->name;

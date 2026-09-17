@@ -301,14 +301,16 @@ def describe(uri, storage_id=''):
     # read_next() is deprecated in favour of read_next_ext(), which returns the send timestamp as
     # well as the receive one. The receive timestamp is the one taken here either way: it is the
     # bag's log_time, and therefore the same clock `ros2 bag info` and `mcap info` measure a bag's
-    # duration on -- which is what makes the honest and averaged rates below comparable.
+    # duration on -- which is what makes the honest and averaged rates below comparable. It is
+    # also the only one on the simulation's clock in a bag recorded under use_sim_time; the send
+    # stamp is the middleware's, and always wall time.
     extended = hasattr(reader, 'read_next_ext')
 
     stamps = {name: [] for name in types}
     events = []
     while reader.has_next():
         if extended:
-            topic, data, _send_ns, nanoseconds = reader.read_next_ext()
+            topic, data, nanoseconds, _send_ns = reader.read_next_ext()
         else:
             topic, data, nanoseconds = reader.read_next()
         seconds = nanoseconds / NANOSECONDS_PER_SECOND

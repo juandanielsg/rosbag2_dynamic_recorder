@@ -58,6 +58,8 @@ def status_msg(**overrides):
         stopped_for_low_disk=False,
         max_bag_size=0,
         stopped_for_max_bag_size=False,
+        use_sim_time=False,
+        waiting_for_clock=False,
     )
     fields.update(overrides)
     return SimpleNamespace(**fields)
@@ -220,6 +222,14 @@ def test_status_reports_the_bag_size_limit_and_a_size_stop():
     as_dict = status.as_dict()
     assert as_dict['max_bag_size'] == 1_000_000
     assert as_dict['stopped_for_max_bag_size'] is True
+
+
+def test_status_reports_sim_time_and_the_wait_for_its_clock():
+    status = Status.from_msg(
+        status_msg(recording=False, use_sim_time=True, waiting_for_clock=True))
+    assert status.use_sim_time is True
+    assert status.waiting_for_clock is True
+    assert status.as_dict()['waiting_for_clock'] is True
 
 
 def test_both_event_streams_sort_together_on_the_recorder_stamp():

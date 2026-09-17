@@ -281,6 +281,11 @@ private:
   /// True while a bag is open. Used to reject topic changes with an accurate reason rather than
   /// reporting the topics themselves as unavailable.
   bool is_recording() const;
+  /// True under use_sim_time until the first /clock message: no bag is opened before it, because
+  /// everything the recorder stamps would read as time 0.
+  bool waiting_for_clock() const;
+  /// Why a call that needs an open bag is being refused, for the response's error_string.
+  std::string stopped_reason() const;
   void handle_get_status(
     const std::shared_ptr<GetStatus::Request> request,
     std::shared_ptr<GetStatus::Response> response);
@@ -307,6 +312,10 @@ private:
   /// Publish a pause or resume on ~/events/pause and, unless disabled, write it into the bag so
   /// the resulting gap across every topic explains itself.
   void emit_pause_event(uint8_t action, const std::string & reason);
+
+  /// Open the bag and subscribe the initial topics: the end of construction, deferred under
+  /// use_sim_time until the clock has started.
+  void start();
 
   /// Write a PAUSED event if the bag is opening while already paused, so a recording that starts
   /// with a hole says why. Covers both start_paused and a ~/record issued while paused.
@@ -398,6 +407,9 @@ private:
     const std::string & tracking_topic, const ScheduleCodes & codes,
     std::function<bool(const std::string &)> action);
 
+  /// The node clock, held so const readers can ask whether it has started (Clock::started() is
+  /// not const). Declared before bag_, which is built on it.
+  rclcpp::Clock::SharedPtr clock_;
   /// The open bag, its channels and its counters. Owns the only writer lock.
   Bag bag_;
 
@@ -481,6 +493,8 @@ private:
 
   /// One timer paces both guards: they fire rarely, and staggering them buys nothing.
   rclcpp::TimerBase::SharedPtr storage_check_timer_;
+  /// Polls for the first /clock under use_sim_time, then runs start() once and stops.
+  rclcpp::TimerBase::SharedPtr clock_wait_timer_;
   /// Why the recorder stopped itself, for the status. Each guard fires once per recording because
   /// it stops it; ~/record clears both when the next bag opens.
   std::atomic_bool stopped_for_low_disk_{false};

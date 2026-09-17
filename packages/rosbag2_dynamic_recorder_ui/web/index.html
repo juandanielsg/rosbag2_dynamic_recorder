@@ -250,6 +250,11 @@ function health(s) {
              note: `No status update for more than ${s.stale_after_seconds}s.` };
   }
   if (!s.recording) {
+    if (s.waiting_for_clock) {
+      return { cls: "warn", text: "Waiting for /clock",
+               note: "use_sim_time is set. No bag is open until the simulation publishes its " +
+                     "clock; nothing is stuck." };
+    }
     // A stop the recorder chose is the one a reader most needs explained.
     if (s.stopped_for_low_disk) {
       return { cls: "bad", text: "Stopped — free space ran low",

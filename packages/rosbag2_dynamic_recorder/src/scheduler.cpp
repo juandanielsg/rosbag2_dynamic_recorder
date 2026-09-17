@@ -50,7 +50,9 @@ void Scheduler::arm(Kind kind, std::chrono::nanoseconds delta, std::function<voi
   if (timer) {
     timer->cancel();
   }
-  timer = node_.create_wall_timer(
+  // The node clock rather than a wall timer, so under use_sim_time a schedule keeps to the
+  // simulation's time even when it runs slow or pauses.
+  timer = node_.create_timer(
     delta,
     [&timer, action = std::move(action)]() {
       timer->cancel();  // One shot.

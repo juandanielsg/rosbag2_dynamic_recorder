@@ -33,6 +33,7 @@ ARGUMENTS = [
     ('serialization_format', 'cdr', 'Message serialization format.'),
     ('topics', '[]', 'Topics to record at startup, as a YAML list. May be empty.'),
     ('start_paused', 'false', 'Start with recording paused.'),
+    ('use_sim_time', 'false', 'Stamp on the /clock-driven node clock; wait for /clock to start.'),
     ('snapshot_mode', 'false', 'Buffer in memory and only write on ~/snapshot.'),
     ('max_cache_size', str(100 * 1024 * 1024),  # the node's own default, 100 MiB
      'Writer cache in bytes. snapshot_mode needs this or max_cache_duration to be > 0.'),
@@ -92,6 +93,7 @@ def recorder_parameters(context):
         'storage_id': LaunchConfiguration('storage_id').perform(context),
         'serialization_format': LaunchConfiguration('serialization_format').perform(context),
         'start_paused': LaunchConfiguration('start_paused').perform(context) == 'true',
+        'use_sim_time': LaunchConfiguration('use_sim_time').perform(context) == 'true',
         'snapshot_mode': LaunchConfiguration('snapshot_mode').perform(context) == 'true',
         'max_cache_size': int(LaunchConfiguration('max_cache_size').perform(context)),
         'max_cache_duration': int(LaunchConfiguration('max_cache_duration').perform(context)),

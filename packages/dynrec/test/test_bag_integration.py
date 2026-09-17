@@ -42,6 +42,8 @@ from ament_index_python.packages import get_package_prefix
 from rclpy.executors import SingleThreadedExecutor
 from rclpy.node import Node
 from rclpy.qos import QoSProfile, ReliabilityPolicy
+from rclpy.time import Time
+from rosgraph_msgs.msg import Clock
 from std_msgs.msg import String
 
 from dynrec import Recorder
@@ -66,6 +68,10 @@ TOPICS = ['/dynrec_bag_test/steady', '/dynrec_bag_test/dropped', '/dynrec_bag_te
 #: Named explicitly when re-subscribing, so a topic can be added before its publisher is visible.
 TOPIC_TYPE = 'std_msgs/msg/String'
 
+#: Where the simulated clock starts: 1970-01-12, so a stamp on the sim timeline cannot be
+#: mistaken for one on the wall clock, in either direction.
+SIM_EPOCH = 1_000_000.0
+
 
 class Publishers(Node):
     def __init__(self, context):
@@ -76,12 +82,20 @@ class Publishers(Node):
         # Appended to every message. Empty by default; the bag-size fixture enlarges it so the bag
         # grows on disk in seconds rather than minutes, and restores it afterwards.
         self.payload = ''
+        # The simulation's clock, published on the same timer while `sim_time` is set: a float
+        # advanced by PERIOD per tick, from SIM_EPOCH. None, the default, publishes nothing.
+        self.sim_time = None
+        self._clock_pub = self.create_publisher(Clock, '/clock', 10)
         self.create_timer(PERIOD, self._tick)
 
     def _tick(self):
         self._seq += 1
         for pub in self._pubs:
             pub.publish(String(data=str(self._seq) + self.payload))
+        if self.sim_time is not None:
+            self.sim_time += PERIOD
+            stamp = Time(nanoseconds=int(self.sim_time * 1e9)).to_msg()
+            self._clock_pub.publish(Clock(clock=stamp))
 
 
 @pytest.fixture(scope='module')
@@ -529,3 +543,52 @@ class TestBagSizeLimitStop:
         assert any('size limit' in warning for warning in summary.warnings), summary.warnings
         assert summary_dict(summary)['stopped_for_max_bag_size'] is True
         assert summary_dict(summary)['stopped_for_low_disk'] is False
+
+
+class TestSimTime:
+    """A recording under use_sim_time: the bag's timeline is the simulation's, not the wall's.
+
+    The recorder must not open a bag before it has heard /clock -- everything it stamped would read
+    as time 0 -- and once it has, messages and its own events must sit on one timeline. Message
+    stamps come from the node clock, event stamps always did; a bag where the two disagree would
+    make every rate and gap `describe()` reports wrong without saying so.
+    """
+
+    @pytest.fixture(scope='class')
+    def sim_bag(self, publishers):
+        tmp = tempfile.mkdtemp(prefix='dynrec_bag_simtime_')
+        bag = os.path.join(tmp, 'bag')
+        proc = run_recorder(bag, 'sim_time_recorder', extra_params=['-p', 'use_sim_time:=true'])
+        try:
+            time.sleep(4.0)
+            check_alive(proc)
+            with Recorder('/sim_time_recorder', domain_id=DOMAIN) as rec:
+                before = rec.status()
+                assert before.waiting_for_clock and not before.recording, before
+                assert not os.path.exists(bag), 'a bag was opened before /clock'
+                with pytest.raises(CallFailed, match='/clock'):
+                    rec.add(['{}:{}'.format(TOPICS[0], TOPIC_TYPE)])
+                publishers.sim_time = SIM_EPOCH
+                rec.wait_for(lambda s: s.recording, timeout=10.0)
+                ensure_recording(rec, TOPICS[:2])
+                time.sleep(3.0)
+                rec.pause()      # an event with a stamp of its own to compare against
+                time.sleep(1.0)
+                rec.stop()
+                time.sleep(1.5)
+            yield bag
+        finally:
+            publishers.sim_time = None
+            stop_recorder(proc)
+            shutil.rmtree(tmp, ignore_errors=True)
+
+    def test_messages_are_stamped_on_the_simulation_clock(self, sim_bag):
+        stats = channel(describe(sim_bag), TOPICS[0])
+        assert SIM_EPOCH <= stats.first <= stats.last <= SIM_EPOCH + 60, (stats.first, stats.last)
+
+    def test_events_and_messages_share_one_timeline(self, sim_bag):
+        summary = describe(sim_bag)
+        stamps = [event.stamp for event in summary.events]
+        assert stamps, summary.warnings
+        assert all(summary.start <= stamp <= summary.end for stamp in stamps), (
+            stamps, summary.start, summary.end)

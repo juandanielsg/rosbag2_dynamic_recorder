@@ -223,6 +223,16 @@ storage plugin had not yet flushed. Treat it as a ceiling with some give, not an
 `~/get_status` carries `max_bag_size` and `stopped_for_max_bag_size`; `~/record` opens a fresh bag
 with the same cap.
 
+## Simulation time
+
+`use_sim_time:=true` does what `ros2 bag record --use-sim-time` does: messages are stamped on the
+node clock driven by `/clock`, so the bag's timeline is the simulation's, and nothing is opened or
+subscribed until `/clock` has been heard, because a bag opened on a clock that reads zero would
+begin in 1970. The recorder answers in the meantime -- `~/status` says `waiting_for_clock`, and a
+call that needs an open bag is refused with a message that says why. Its own events were always on
+the node clock, so the two timelines in one bag agree; and node-time schedules follow the simulation
+when it runs slow or stops. Details in [docs/services.md](docs/services.md#simulation-time).
+
 ## Command line
 
 `ros2 dynrec` drives a running recorder without service-call syntax or a display:
@@ -386,6 +396,7 @@ debug the network.
 | `serialization_format` | `cdr` | Message serialization format. |
 | `topics` | `[]` | Topics to subscribe at startup. |
 | `start_paused` | `false` | Start with recording paused. |
+| `use_sim_time` | `false` | Stamp messages on the node clock driven by `/clock`, and open nothing until it has started. See [Simulation time](#simulation-time). |
 | `snapshot_mode` | `false` | Buffer in memory, write only on `~/snapshot`. |
 | `max_cache_size` | `104857600` | Writer cache in bytes. `snapshot_mode` needs this or `max_cache_duration` > 0. |
 | `max_cache_duration` | `0` | Writer cache bound in seconds; `0` for none. Combines with `max_cache_size`. |
@@ -404,7 +415,7 @@ debug the network.
 | `messages_lost_report_period` | `5.0` | Seconds between `MessagesLostEvent`. `0` disables. |
 | `status_publish_period` | `1.0` | Seconds between status publications. |
 
-`dynamic_recorder.launch.py` forwards the common arguments, including `min_free_space`,
+`dynamic_recorder.launch.py` forwards the common arguments, including `use_sim_time`, `min_free_space`,
 `min_free_space_percent` and `max_bag_size`. `record_pause_events`, `record_low_disk_events`,
 `record_bag_size_limit_events`, `storage_check_period`, `status_publish_period` and the profiles
 are not exposed, so set them
