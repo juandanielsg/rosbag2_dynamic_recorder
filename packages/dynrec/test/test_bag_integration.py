@@ -46,6 +46,7 @@ from std_msgs.msg import String
 
 from dynrec import Recorder
 from dynrec.bag import describe, summary_dict
+from dynrec.errors import CallFailed
 
 # A domain of its own, passed explicitly to every participant rather than exported into the
 # environment. Setting ROS_DOMAIN_ID at module scope would be a global write at import time, and
@@ -171,6 +172,39 @@ def ensure_recording(rec, topics, timeout=30.0):
                 'recorder never subscribed {} after {:g}s; it has {}'.format(
                     missing, timeout, subscribed))
         rec.add(['{}:{}'.format(topic, TOPIC_TYPE) for topic in missing])
+        time.sleep(0.5)
+
+
+def wait_for_size_cap(rec, timeout=30.0):
+    """Block until the recorder reports it stopped for its bag-size cap.
+
+    Unlike the low-disk guard, this one only fires once data has reached the disk -- so the
+    recorder must really be subscribed, and `ensure_recording` explains why a fixed sleep does not
+    guarantee that on CI. But `ensure_recording` cannot simply be called first: on a machine that
+    wins the discovery race, a recorder fed 2 MB/s against a 200 KB cap has already stopped by the
+    time this client connects, has unsubscribed everything, and refuses `add()` -- exactly what
+    happens on the development machine. So check the recorder's own word first and only
+    re-subscribe while it is still recording; the refusal is still caught, because the stop can
+    land between the check and the call.
+
+    Until the stop is reported the bag is still open, has no metadata.yaml, and cannot be read
+    back at all -- which is how the fixed sleep this replaces failed on CI.
+    """
+    deadline = time.monotonic() + timeout
+    while True:
+        status = rec.status()
+        if status.stopped_for_max_bag_size:
+            return status
+        if time.monotonic() >= deadline:
+            raise AssertionError(
+                'recorder never reached its size cap after {:g}s; it has {} on {} bytes'.format(
+                    timeout, status.subscribed_topics, status.bag_size_bytes))
+        missing = [topic for topic in TOPICS[:2] if topic not in status.subscribed_topics]
+        if missing:
+            try:
+                rec.add(['{}:{}'.format(topic, TOPIC_TYPE) for topic in missing])
+            except CallFailed:
+                pass    # stopped just now; the next status() says so
         time.sleep(0.5)
 
 
@@ -468,8 +502,11 @@ class TestBagSizeLimitStop:
             '-p', 'max_bag_size:={}'.format(self.LIMIT),
             '-p', 'storage_check_period:=0.2'])
         try:
-            time.sleep(8.0)
+            time.sleep(4.0)
             check_alive(proc)
+            with Recorder('/size_limited_recorder', domain_id=DOMAIN) as rec:
+                wait_for_size_cap(rec)
+                time.sleep(1.5)
             yield bag
         finally:
             publishers.payload = ''
