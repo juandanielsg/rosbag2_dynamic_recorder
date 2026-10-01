@@ -341,7 +341,11 @@ bool DynamicRecorder::subscribe_topic(
   // with history matching or deeper than what is offered. The loss is upstream of us -- publishers
   // at KEEP_LAST(10) overwrite their history while the callback thread is blocked, so the samples
   // are never delivered and no reader-side loss event can fire.
-  {
+  //
+  // Debug level, and not even formatted otherwise: at info it was one log write per topic added,
+  // and a log write waits on the disk. In the benchmark, 5 of 4,020 adds stalled here for up to
+  // 5.8 s during disk stalls, and nothing else in this phase can block.
+  if (rcutils_logging_logger_is_enabled_for(get_logger().get_name(), RCUTILS_LOG_SEVERITY_DEBUG)) {
     const auto describe = [](const rclcpp::QoS & q) {
         const auto & p = q.get_rmw_qos_profile();
         std::string reliability = p.reliability == RMW_QOS_POLICY_RELIABILITY_RELIABLE ?
@@ -357,7 +361,7 @@ bool DynamicRecorder::subscribe_topic(
     for (const auto & endpoint : endpoints) {
       offered += (offered.empty() ? "" : ", ") + describe(endpoint.qos_profile());
     }
-    RCLCPP_INFO(get_logger(), "QoS '%s': offered [%s] -> subscribing %s",
+    RCLCPP_DEBUG(get_logger(), "QoS '%s': offered [%s] -> subscribing %s",
       topic_name.c_str(), offered.c_str(), describe(qos).c_str());
   }
 
@@ -459,7 +463,8 @@ bool DynamicRecorder::subscribe_topic(
     subscriptions_[topic_name] = Subscription{
       std::move(subscription), std::move(enabled), std::move(last_publication_seq)};
   }
-  RCLCPP_INFO(get_logger(), "Subscribed '%s' [%s]", topic_name.c_str(), topic_type.c_str());
+  // Debug: the caller logs the whole batch in one line (see log_topic_change()).
+  RCLCPP_DEBUG(get_logger(), "Subscribed '%s' [%s]", topic_name.c_str(), topic_type.c_str());
   emit_subscription_change(
     topic_name, topic_type, SubscriptionChangeEvent::SUBSCRIBED, current_reason_);
   return true;
@@ -478,7 +483,7 @@ bool DynamicRecorder::unsubscribe_topic(const std::string & topic_name)
     // clean rather than reading the publisher's continued counting as loss.
     subscriptions_.erase(it);
   }
-  RCLCPP_INFO(get_logger(), "Unsubscribed '%s'", topic_name.c_str());
+  RCLCPP_DEBUG(get_logger(), "Unsubscribed '%s'", topic_name.c_str());
 
   // Emitted outside subscriptions_mutex_: emitting takes the bag's lock, and keeping the two
   // uncrossed here means there is no lock-ordering cycle with subscribe_topic().
@@ -583,6 +588,7 @@ void DynamicRecorder::subscribe_batch(
       break;
     }
   }
+  std::vector<std::string> added;
   for (size_t i = 0; i < topics.size(); ++i) {
     const auto & topic_name = topics[i];
 
@@ -601,12 +607,34 @@ void DynamicRecorder::subscribe_batch(
       topic_type = resolved.value();
     }
 
+    bool already;
+    {
+      std::lock_guard<std::mutex> lock(subscriptions_mutex_);
+      already = subscriptions_.count(topic_name) > 0;
+    }
     if (subscribe_topic(topic_name, topic_type)) {
       subscribed_out.push_back(topic_name);
+      if (!already) {
+        added.push_back(topic_name);
+      }
     } else {
       unavailable_out.push_back(topic_name);
     }
   }
+  log_topic_change("Subscribed", added);
+}
+
+void DynamicRecorder::log_topic_change(
+  const char * verb, const std::vector<std::string> & topics) const
+{
+  if (topics.empty()) {
+    return;
+  }
+  std::string list;
+  for (const auto & topic : topics) {
+    list += (list.empty() ? "" : ", ") + topic;
+  }
+  RCLCPP_INFO(get_logger(), "%s %zu topic(s): %s", verb, topics.size(), list.c_str());
 }
 
 void DynamicRecorder::handle_subscribe_topics(
@@ -686,6 +714,7 @@ void DynamicRecorder::handle_unsubscribe_topics(
       response->not_subscribed_topics.push_back(topic_name);
     }
   }
+  log_topic_change("Unsubscribed", response->unsubscribed_topics);
 
   if (response->unsubscribed_topics.empty() && !topics.empty()) {
     response->return_code = kReturnError;
@@ -742,6 +771,7 @@ void DynamicRecorder::handle_set_topics(
       response->unsubscribed_topics.push_back(topic_name);
     }
   }
+  log_topic_change("Unsubscribed", response->unsubscribed_topics);
 
   std::vector<std::string> subscribed;
   subscribe_batch(topics, types, subscribed, response->unavailable_topics);
@@ -1322,6 +1352,7 @@ bool DynamicRecorder::set_profile(
       unsubscribed_out.push_back(topic_name);
     }
   }
+  log_topic_change("Unsubscribed", unsubscribed_out);
   subscribe_batch(profile->second, {}, subscribed_out, unavailable_out);
   return true;
 }

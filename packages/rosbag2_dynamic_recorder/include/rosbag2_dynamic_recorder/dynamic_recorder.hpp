@@ -148,6 +148,10 @@ public:
   /// Messages the transport reported as dropped before delivery, summed over all topics.
   uint64_t messages_lost_in_transport() const;
 
+  /// The group every service and timer runs in, apart from the subscriptions, so a slow operation
+  /// cannot stall recording. Exposed so an executable can give it a thread of its own.
+  rclcpp::CallbackGroup::SharedPtr service_callback_group() const {return service_callback_group_;}
+
   /// Messages that reached the recorder and were then dropped by the writer -- cache overflow
   /// when the disk cannot keep up, or a storage write that failed -- summed over all topics.
   ///
@@ -232,6 +236,11 @@ private:
   /// topic keeps its existing messages and becomes a sparse channel.
   /// \return false if the topic was not subscribed.
   bool unsubscribe_topic(const std::string & topic_name);
+
+  /// One info line for a whole batch of topic changes, nothing for an empty one. Per topic it was
+  /// a log write each, and a log write waits on the disk; the per-topic record is the
+  /// SubscriptionChangeEvent, published and written into the bag.
+  void log_topic_change(const char * verb, const std::vector<std::string> & topics) const;
 
   /// active_profile() against an already-computed topic set, so a caller that has one does not pay
   /// for a second lock/copy/sort of the subscription map.
@@ -439,7 +448,8 @@ private:
   mutable std::mutex subscriptions_mutex_;
 
   /// Services run here, separate from the default group used by subscription callbacks, so that
-  /// the ~0.5s cost of adding a topic cannot block message delivery.
+  /// adding a topic cannot block message delivery. An add is ~2 ms, but creating its channel
+  /// waits on storage, and a disk stall has held it for seconds.
   rclcpp::CallbackGroup::SharedPtr service_callback_group_;
 
   rclcpp::Service<SubscribeTopics>::SharedPtr srv_subscribe_topics_;
