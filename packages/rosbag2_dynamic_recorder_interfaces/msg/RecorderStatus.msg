@@ -20,11 +20,17 @@ bool paused
 # True if the writer is buffering in memory and only flushes on ~/snapshot.
 bool snapshot_mode
 
-# When recording started, on the node clock.
+# When this status was built, on the node clock: the recorder's clock as of this message. Under
+# use_sim_time it is the simulation's. A client counting down to a schedule, or turning "+30s" into
+# a time, should count from this rather than from its own clock.
+builtin_interfaces/Time stamp
+
+# When recording started, on the node clock. While stopped, when the last bag started.
 builtin_interfaces/Time recording_started
 
-# Seconds since recording started. Provided so a client on a different machine does not have to
-# reconcile clocks to show an elapsed time.
+# Seconds the bag has been recording. While stopped, how long the last bag ran: it stops counting
+# at a stop. Provided so a client on a different machine does not have to reconcile clocks to show
+# an elapsed time.
 float64 elapsed_seconds
 
 # Topics currently subscribed, sorted.

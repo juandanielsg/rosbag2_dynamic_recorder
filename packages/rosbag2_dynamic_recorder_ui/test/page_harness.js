@@ -102,6 +102,9 @@ console.log("render paths:");
 check("connected state", () => sandbox.__render(state));
 check("rendered twice", () => sandbox.__render(state));
 check("disconnected state", () => sandbox.__render(disconnected));
+// Stopped: the timeline is the last bag's, frozen, and the controls give way to a start.
+check("stopped state", () => sandbox.__render(Object.assign({}, state,
+  { recording: false, subscribed_topics: [] })));
 check("back to connected", () => sandbox.__render(state));
 
 // The filter has the most branches, and none of them may throw -- least of all the invalid

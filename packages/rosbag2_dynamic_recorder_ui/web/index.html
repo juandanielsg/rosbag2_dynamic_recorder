@@ -297,7 +297,7 @@ function renderStats(s) {
   $("stats").innerHTML = `
     <div class="stat"><div class="k">Recorded</div><div class="v">${fmtInt(s.messages_written)}</div></div>
     <div class="stat"><div class="k">Missing</div>${missed}</div>
-    <div class="stat"><div class="k">Running for</div><div class="v">${fmtDuration(s.elapsed_seconds)}</div></div>
+    <div class="stat"><div class="k">${s.recording ? "Running for" : "Recorded for"}</div><div class="v">${fmtDuration(s.elapsed_seconds)}</div></div>
     <div class="stat"><div class="k">Topics</div><div class="v">${s.subscribed_topics.length}</div></div>
     <div class="stat"><div class="k">On disk</div><div class="v">${fmtBytes(s.bag_size_bytes)}</div></div>`;
 }

@@ -516,6 +516,21 @@ def test_resume_is_refused_while_stopped(recorder):
     assert "stopped" in response.error_string.lower()
 
 
+def test_a_stopped_recorder_stops_counting_but_its_stamp_does_not(recorder):
+    """elapsed_seconds kept growing after a stop, and the UI's timeline grew with it."""
+    harness, _ = recorder
+    harness.call(SubscribeTopics, "subscribe_topics", topics=[TOPICS[0]])
+    harness.spin_for(1.0)
+    harness.call(Stop, "stop")
+    first = harness.status()
+    harness.spin_for(2.0)
+    second = harness.status()
+    assert first.elapsed_seconds > 0, "the bag ran for a while before the stop"
+    assert second.elapsed_seconds == first.elapsed_seconds, "a stopped bag does not keep running"
+    seconds = lambda t: t.sec + t.nanosec / 1e9  # noqa: E731
+    assert seconds(second.stamp) - seconds(first.stamp) >= 1.5, "the recorder's clock keeps going"
+
+
 def test_second_stop_is_reported_not_silently_accepted(recorder):
     harness, _ = recorder
     assert harness.call(Stop, "stop").return_code == 0

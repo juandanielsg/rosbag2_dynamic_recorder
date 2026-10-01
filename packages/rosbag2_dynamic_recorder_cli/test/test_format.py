@@ -68,6 +68,7 @@ def _status(**overrides):
     )
     base.update(overrides)
     base.setdefault('recording_started', SimpleNamespace(sec=1788500000, nanosec=0))
+    base.setdefault('stamp', SimpleNamespace(sec=1788500075, nanosec=0))
     return Status.from_msg(SimpleNamespace(**base), recorder='/rec')
 
 

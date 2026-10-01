@@ -106,6 +106,9 @@ class Status:
     #: True under `use_sim_time` until the first `/clock` message: no bag is open yet, and every
     #: call that needs one is refused until then.
     waiting_for_clock: bool = False
+    #: When the recorder built this status, as epoch seconds on its clock: that clock's reading as
+    #: of now, give or take delivery. `elapsed_seconds` stops counting at a stop; this does not.
+    stamp: float = 0.0
 
     @classmethod
     def from_msg(cls, msg, recorder=''):
@@ -139,6 +142,7 @@ class Status:
             stopped_for_max_bag_size=bool(msg.stopped_for_max_bag_size),
             use_sim_time=bool(msg.use_sim_time),
             waiting_for_clock=bool(msg.waiting_for_clock),
+            stamp=_stamp_seconds(msg.stamp),
         )
 
     def as_dict(self):

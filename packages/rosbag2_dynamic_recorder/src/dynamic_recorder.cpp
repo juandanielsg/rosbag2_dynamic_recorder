@@ -1142,10 +1142,15 @@ DynamicRecorder::RecorderStatus DynamicRecorder::build_status() const
   status.snapshot_mode = config_.snapshot_mode;
   status.paused = paused_.load();
   const auto bag = bag_.info();
+  const auto stamp = now();
+  status.stamp = stamp;
   status.recording = bag.open;
   status.uri = bag.uri;
   status.recording_started = bag.opened_at;
-  status.elapsed_seconds = (now() - bag.opened_at).seconds();
+  // Stops counting at a stop: a stopped recorder's figure is how long its last bag ran. It used to
+  // keep counting, and the UI's timeline and "running for" kept growing after the recording ended.
+  // Before any bag both times are zero, and so is this.
+  status.elapsed_seconds = ((bag.open ? stamp : bag.closed_at) - bag.opened_at).seconds();
   // One lock/copy/sort of the subscription map, reused for both fields.
   status.subscribed_topics = subscribed_topics();
   status.active_profile = active_profile_for(status.subscribed_topics);

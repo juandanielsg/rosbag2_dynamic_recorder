@@ -52,6 +52,8 @@ public:
     bool open{false};
     std::string uri;
     rclcpp::Time opened_at;
+    /// When the last bag was closed; meaningful only while `open` is false. Zero before any close.
+    rclcpp::Time closed_at;
     uint64_t messages_written{0};
     uint64_t write_errors{0};
     uint64_t splits{0};
@@ -111,6 +113,7 @@ private:
   std::string uri_;
   std::string serialization_format_;
   rclcpp::Time opened_at_;
+  rclcpp::Time closed_at_;
   /// Topic -> type of every channel created in this bag, so a second request for the same
   /// topic skips the expensive create_topic() and a type change is caught.
   std::unordered_map<std::string, std::string> channels_;

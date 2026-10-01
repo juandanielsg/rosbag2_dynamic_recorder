@@ -37,6 +37,8 @@ def _status(**overrides):
         snapshot_mode=False,
         elapsed_seconds=12.5,
         recording_started=SimpleNamespace(sec=1788500000, nanosec=500000000),
+        # Built 12.5 s after the start, which is what elapsed_seconds says while recording.
+        stamp=SimpleNamespace(sec=1788500013, nanosec=0),
         subscribed_topics=["/a", "/b"],
         active_profile="",
         messages_written=100,

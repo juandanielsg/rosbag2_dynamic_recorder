@@ -174,9 +174,15 @@ A few fields need reading carefully:
   waiting for that clock's first message. While it waits no bag is open and every call that needs
   one is refused with a message saying so; see [Simulation time](#simulation-time).
 
-The remaining fields are literal: `recording`, `paused`, `snapshot_mode`, `elapsed_seconds`,
-`recording_started`, `subscribed_topics`, `bag_splits` (times the file has rolled over) and
-`messages_written` (which counts the recorder's own event messages too).
+`stamp`, `recording_started`, `elapsed_seconds`
+: When the status was built, when the bag started, and how long it has been recording, all on the
+  node clock. Once stopped, `recording_started` and `elapsed_seconds` describe the last bag and stop
+  advancing; `stamp` keeps going. A client that needs the recorder's current time, to count down to
+  a schedule or to turn `+30s` into a time, should use `stamp`.
+
+The remaining fields are literal: `recording`, `paused`, `snapshot_mode`, `subscribed_topics`,
+`bag_splits` (times the file has rolled over) and `messages_written` (which counts the recorder's
+own event messages too).
 
 `active_profile` is derived from the live topic set on every publication, not remembered. Record one
 extra topic and it goes empty, because no profile is in effect any more. Land exactly on another

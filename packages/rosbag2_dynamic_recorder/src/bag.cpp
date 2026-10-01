@@ -25,7 +25,8 @@ Bag::Bag(rclcpp::Logger logger, rclcpp::Clock::SharedPtr clock)
 : logger_(std::move(logger)), clock_(std::move(clock)),
   // On the node's clock type from the start: before the first open it is still subtracted from
   // now() for the status, and rclcpp refuses arithmetic across clock types.
-  opened_at_(int64_t{0}, clock_->get_clock_type())
+  opened_at_(int64_t{0}, clock_->get_clock_type()),
+  closed_at_(int64_t{0}, clock_->get_clock_type())
 {
 }
 
@@ -75,6 +76,9 @@ bool Bag::close()
   if (!open_) {
     return false;
   }
+  // The moment the recording ends, before the close that can take seconds on a slow disk:
+  // nothing arriving after it is written.
+  closed_at_ = clock_->now();
   open_ = false;
   writer_->close();
   return true;
@@ -96,7 +100,7 @@ Bag::Info Bag::info() const
 {
   std::lock_guard<std::mutex> lock(mutex_);
   return {
-    open_, uri_, opened_at_,
+    open_, uri_, opened_at_, closed_at_,
     messages_written_.load(std::memory_order_relaxed),
     write_errors_.load(std::memory_order_relaxed),
     splits_.load(std::memory_order_relaxed),

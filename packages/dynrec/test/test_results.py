@@ -39,6 +39,7 @@ def status_msg(**overrides):
         paused=False,
         snapshot_mode=False,
         recording_started=stamp(1756900000, 500000000),
+        stamp=stamp(1756900013),
         elapsed_seconds=12.5,
         subscribed_topics=['/scan', '/odom'],
         active_profile='small',
@@ -240,3 +241,11 @@ def test_both_event_streams_sort_together_on_the_recorder_stamp():
         action=0, stamp=stamp(3), reason='startup', node_name='/r',
         topic_name='/scan', topic_type='std_msgs/msg/String'))
     assert [e.stamp for e in sorted([pause, change], key=lambda e: e.stamp)] == [3.0, 5.0]
+
+
+def test_the_status_carries_the_recorders_clock_apart_from_the_elapsed_time():
+    """elapsed_seconds stops counting at a stop; the stamp is what still says what time it is."""
+    status = Status.from_msg(status_msg(recording=False, elapsed_seconds=5.0,
+                                        stamp=stamp(1756900100, 250000000)))
+    assert status.stamp == 1756900100.25
+    assert status.elapsed_seconds == 5.0

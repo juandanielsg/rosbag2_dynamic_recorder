@@ -60,6 +60,7 @@ SAMPLE_STATE = {
     "snapshot_mode": False,
     "elapsed_seconds": 62.5,
     "recording_started": 1788500000.0,
+    "stamp": 1788500062.5,
     "subscribed_topics": ["/spike/a", "/spike/c"],
     "active_profile": "",
     "available_topics": ["/spike/a", "/spike/b", "/spike/c"],
