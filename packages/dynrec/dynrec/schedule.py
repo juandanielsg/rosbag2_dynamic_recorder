@@ -140,19 +140,19 @@ def parse_mode(value):
             "unknown mode '{}'. Choose one of: {}".format(value, ', '.join(sorted(TIME_MODES))))
 
 
-def apply_schedule(request, at, mode, tracking_topic, time_field, mode_field):
-    """Fill a scheduled request's time, mode and tracking topic. Returns the epoch time, or None.
-
-    Leaving the timestamp at zero is how these services are told to act immediately, and the
-    recorder reads a zero stamp as absent rather than as time zero -- so the untouched request is
-    already the "do it now" request.
-    """
-    request.tracking_topic_name = tracking_topic or ''
-    setattr(request, mode_field, parse_mode(mode))
+def set_stamp(stamp, at):
+    """Set a builtin_interfaces/Time to `at` (anything parse_time() reads). Returns the epoch
+    time, or None when `at` is None and the stamp is left at zero, which the services read as
+    "now"."""
     if at is None:
         return None
-    seconds, nanoseconds = parse_time(at)
-    stamp = getattr(request, time_field)
-    stamp.sec = seconds
-    stamp.nanosec = nanoseconds
-    return seconds + nanoseconds / NANOSECONDS_PER_SECOND
+    stamp.sec, stamp.nanosec = parse_time(at)
+    return stamp.sec + stamp.nanosec / NANOSECONDS_PER_SECOND
+
+
+def apply_schedule(request, at, mode, tracking_topic, time_field, mode_field):
+    """Fill a scheduled request's time, mode and tracking topic. Returns the epoch time, or None
+    for an immediate request."""
+    request.tracking_topic_name = tracking_topic or ''
+    setattr(request, mode_field, parse_mode(mode))
+    return set_stamp(getattr(request, time_field), at)

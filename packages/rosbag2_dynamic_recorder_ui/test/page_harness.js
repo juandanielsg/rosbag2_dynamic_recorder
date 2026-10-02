@@ -2,10 +2,8 @@
 //
 //     node page_harness.js <script.js> <state.json>
 //
-// Exists because nothing in this project ever executed the page's JavaScript. A parse error in it
-// went unnoticed for two days: the unit tests only cover build_state, and /api/state answers
-// whether or not the page parses, so every check passed while the page showed nothing but its
-// static placeholder text.
+// Exists because nothing else executes the page's JavaScript: /api/state answers whether or not
+// the page parses, so a parse error would leave the UI frozen behind a green test suite.
 //
 // This is not a browser and does not pretend to be one. It answers three questions: does the render
 // path throw, which is the failure that leaves the page frozen; does text from the ROS graph reach

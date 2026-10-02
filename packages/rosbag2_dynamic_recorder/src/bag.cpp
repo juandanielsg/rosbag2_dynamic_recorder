@@ -15,6 +15,7 @@
 #include "rosbag2_dynamic_recorder/bag.hpp"
 
 #include <chrono>
+#include <filesystem>
 #include <memory>
 #include <string>
 #include <utility>
@@ -33,7 +34,27 @@ constexpr auto kBusyPoll = std::chrono::microseconds(200);
 
 // The stage's size when the writer has no cache to take it from.
 constexpr size_t kDefaultMaxStagedBytes = 64 * 1024 * 1024;
+
+// How many "(N)" suffixes unused_bag_path() tries.
+constexpr int kMaxBagPathSuffix = 10000;
 }  // namespace
+
+std::optional<std::string> unused_bag_path(const std::string & uri)
+{
+  namespace fs = std::filesystem;
+  std::error_code ec;
+  if (!fs::exists(uri, ec)) {
+    return uri;
+  }
+  for (int i = 1; i < kMaxBagPathSuffix; ++i) {
+    fs::path candidate(uri);
+    candidate += "(" + std::to_string(i) + ")";
+    if (!fs::exists(candidate, ec)) {
+      return candidate.generic_string();
+    }
+  }
+  return std::nullopt;
+}
 
 Bag::Busy::Busy(Bag & bag)
 : bag_(bag)
@@ -183,8 +204,13 @@ std::string Bag::ensure_channel(const rosbag2_storage::TopicMetadata & metadata)
     return "";
   }
   Busy busy(*this);
-  // Resolves the message definition, and writes the channel to storage: behind rosbag2's storage
-  // mutex, so as long as a disk stall lasts. Recorded messages are staged meanwhile.
+  return create_channel_locked(metadata);
+}
+
+std::string Bag::create_channel_locked(const rosbag2_storage::TopicMetadata & metadata)
+{
+  // Resolves the message definition and writes the channel to storage, behind rosbag2's storage
+  // mutex: as slow as a disk stall. The caller holds the writer busy, so messages are staged.
   try {
     writer_->create_topic(metadata);
     Timings::phase_here("create_topic");
@@ -296,23 +322,14 @@ void Bag::write_event(
   }
   Busy busy(*this);
   if (channels_.count(topic) == 0) {
-    try {
-      writer_->create_topic({0u, topic, type, serialization_format_, {}, ""});
-    } catch (const std::exception & e) {
-      RCLCPP_ERROR(logger_, "Could not create the event channel '%s': %s", topic.c_str(),
-        e.what());
+    const auto error = create_channel_locked({0u, topic, type, serialization_format_, {}, ""});
+    if (!error.empty()) {
+      RCLCPP_ERROR(logger_, "%s", error.c_str());
       return;
     }
-    channels_.emplace(topic, type);
   }
-  try {
-    writer_->write(std::move(message), topic, type, stamp_ns, stamp_ns);
-    messages_written_.fetch_add(1, std::memory_order_relaxed);
-    Timings::phase_here("event_write");
-  } catch (const std::exception & e) {
-    write_errors_.fetch_add(1, std::memory_order_relaxed);
-    RCLCPP_ERROR(logger_, "Could not record an event on '%s': %s", topic.c_str(), e.what());
-  }
+  write_locked(std::move(message), topic, type, stamp_ns, stamp_ns);
+  Timings::phase_here("event_write");
 }
 
 bool Bag::split(const std::string & reason)

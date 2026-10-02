@@ -71,8 +71,6 @@ public:
   explicit StorageGuard(
     Limits limits, std::chrono::steady_clock::duration cache_ttl = kDefaultCacheTtl);
 
-  const Limits & limits() const {return limits_;}
-
   /// Forget the cached size: a new bag is empty, and last bag's figure would be actively wrong.
   void reset();
 

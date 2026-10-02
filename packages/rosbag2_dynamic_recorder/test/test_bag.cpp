@@ -170,4 +170,14 @@ TEST_F(BagStaging, what_is_staged_after_a_stop_is_not_recorded)
   EXPECT_EQ(read_back(), (std::vector<uint64_t>{1}));
 }
 
+TEST_F(BagStaging, a_new_bag_never_opens_over_an_existing_one)
+{
+  using rosbag2_dynamic_recorder::unused_bag_path;
+  EXPECT_EQ(unused_bag_path(uri_), uri_) << "nothing there yet";
+  std::filesystem::create_directories(uri_);
+  std::filesystem::create_directories(uri_ + "(1)");
+  EXPECT_EQ(unused_bag_path(uri_), uri_ + "(2)");
+  std::filesystem::remove_all(uri_ + "(1)");
+}
+
 }  // namespace

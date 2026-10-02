@@ -17,6 +17,7 @@ import os
 import sys
 
 from rosbag2_dynamic_recorder_cli.api import EXIT_ERROR, EXIT_OK, EXIT_UNEXPLAINED_GAPS
+from rosbag2_dynamic_recorder_cli.format import format_bag_summary
 from rosbag2_dynamic_recorder_cli.verb import VerbExtension
 
 
@@ -40,7 +41,7 @@ class InfoVerb(VerbExtension):
         # Imported here rather than at module scope so that `ros2 dynrec --help` still works, and
         # every other verb still runs, in an installation that lacks the library.
         try:
-            from dynrec.bag import describe, format_summary, summary_dict
+            from dynrec.bag import describe
         except ImportError as exc:
             print('this verb needs the dynrec package: {}'.format(exc), file=sys.stderr)
             return EXIT_ERROR
@@ -57,11 +58,9 @@ class InfoVerb(VerbExtension):
             return EXIT_ERROR
 
         if args.json:
-            print(json.dumps(summary_dict(summary), indent=2))
+            print(json.dumps(summary.as_dict(), indent=2))
         else:
-            print('\n'.join(format_summary(summary)))
+            print('\n'.join(format_bag_summary(summary)))
 
-        # Non-zero when the bag holds a hole nothing accounts for, so a script checking a
-        # recording can act on it. A sparse channel is normal and is not an error; a simultaneous
-        # unexplained gap across every channel is the one shape that should not be there.
+        # A sparse channel is normal; a hole across every channel that nothing explains is not.
         return EXIT_UNEXPLAINED_GAPS if summary.unexplained_gaps else EXIT_OK

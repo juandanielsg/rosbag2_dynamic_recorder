@@ -24,11 +24,9 @@ waits forever. Owning the context sidesteps that completely: calls block the cal
 nothing else, whether or not the caller has ROS of its own. The cost is a second participant on
 the graph per client, which is why `Recorder` is meant to be long-lived and is a context manager.
 
-**One client per service, created once and kept.** `ros2 dynrec` creates and destroys a client per
-invocation, which is right for a process that exits a moment later and wrong for a script that
-runs for a week. It is also the suspect for a measured ceiling: a single rclpy node stopped
-receiving service responses after roughly 7,000 calls -- reproduced against a pure read touching
-none of the recording path, while an external process queried the same recorder fine.
+**One client per service, created once and kept.** Creating and destroying a client per call is
+fine for a process that exits a moment later, but a long-running script would churn through
+clients, and a single rclpy node doing that has been seen to stop receiving replies.
 
 **Failures raise; partial success does not.** A refused call becomes an exception because a script
 that ignores one has to work at it. But a call that subscribed two topics of three is reported by
@@ -72,7 +70,7 @@ from dynrec.services import (
     Stop,
     TogglePaused,
 )
-from dynrec.schedule import NANOSECONDS_PER_SECOND, apply_schedule, parse_time
+from dynrec.schedule import apply_schedule, set_stamp
 from dynrec.topics import parse_topic_specs, require_a_selection
 
 #: Seconds to wait for a service to appear and then to reply. Generous because adding a topic
@@ -85,6 +83,14 @@ DEFAULT_TIMEOUT = 10.0
 DEFAULT_DISCOVERY_TIMEOUT = 5.0
 
 _node_names = count()
+
+
+def _latched(depth):
+    """The recorder's status and events are transient-local, so a client that joins late still
+    receives the current status and recent events at once."""
+    return QoSProfile(
+        depth=depth, reliability=ReliabilityPolicy.RELIABLE,
+        durability=DurabilityPolicy.TRANSIENT_LOCAL, history=HistoryPolicy.KEEP_LAST)
 
 
 def _unique_node_name():
@@ -417,14 +423,9 @@ class Recorder:
         """
         request = Record.Request()
         request.uri = uri
-        if at is None:
-            self._call(Record, 'record', request)
-            return None
-        seconds, nanoseconds = parse_time(at)
-        request.start_time.sec = seconds
-        request.start_time.nanosec = nanoseconds
+        scheduled = set_stamp(request.start_time, at)
         self._call(Record, 'record', request)
-        return seconds + nanoseconds / NANOSECONDS_PER_SECOND
+        return scheduled
 
     # -- watching -------------------------------------------------------------------------
 
@@ -448,11 +449,7 @@ class Recorder:
                 # mid-recording see current state at once instead of waiting for the next tick.
                 self._status_sub = self._ros.node.create_subscription(
                     RecorderStatus, '{}/status'.format(self.name), self._deliver_status,
-                    QoSProfile(
-                        depth=1,
-                        reliability=ReliabilityPolicy.RELIABLE,
-                        durability=DurabilityPolicy.TRANSIENT_LOCAL,
-                        history=HistoryPolicy.KEEP_LAST))
+                    _latched(depth=1))
         return _Handle(lambda: self._drop(self._status_callbacks, callback))
 
     def on_event(self, callback):
@@ -469,16 +466,11 @@ class Recorder:
         with self._lock:
             self._event_callbacks.append(callback)
             if not self._event_subs:
-                events_qos = QoSProfile(
-                    depth=50,
-                    reliability=ReliabilityPolicy.RELIABLE,
-                    durability=DurabilityPolicy.TRANSIENT_LOCAL,
-                    history=HistoryPolicy.KEEP_LAST)
                 self._event_subs = [
                     self._ros.node.create_subscription(
                         getattr(interface_msgs, msg_type), self.name + suffix,
                         lambda msg, parse=parse: self._deliver_event(parse(msg)),
-                        events_qos)
+                        _latched(depth=50))
                     for suffix, (msg_type, parse) in EVENT_STREAMS.items()
                 ]
         return _Handle(lambda: self._drop(self._event_callbacks, callback))
@@ -535,12 +527,8 @@ class Recorder:
     # -- the one path to the recorder -----------------------------------------------------
 
     def _call(self, srv_type, verb, request=None):
-        """Call `<recorder>/<verb>`, returning the response or raising.
-
-        Clients are cached: the same service called a thousand times reuses one client, which is
-        both faster and, past the ~7,000-call ceiling observed on a single rclpy node, the
-        difference between a script that keeps working and one that quietly stops getting replies.
-        """
+        """Call `<recorder>/<verb>`, returning the response or raising. Clients are cached, one
+        per service (see the module docstring)."""
         service = '{}/{}'.format(self.name, verb)
         client = self._client_for(srv_type, service)
         if not client.wait_for_service(timeout_sec=self.timeout):

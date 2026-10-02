@@ -70,21 +70,21 @@ TEST_F(SchedulerTest, modes_are_the_services_constants_and_nothing_else)
 TEST_F(SchedulerTest, a_message_time_schedule_fires_once_on_the_clock_it_named)
 {
   scheduler_->schedule_at_message_time(Kind::Resume, 1000, Mode::PublishTime, "");
-  EXPECT_FALSE(scheduler_->fired("/a", 999, 5000).resume) << "publish time not reached";
-  EXPECT_FALSE(scheduler_->fired("/a", 0, 5000).resume) << "a missing stamp never fires";
-  EXPECT_TRUE(scheduler_->fired("/a", 1000, 0).resume);
-  EXPECT_FALSE(scheduler_->fired("/a", 2000, 0).resume) << "each schedule fires once";
+  EXPECT_FALSE(scheduler_->take_due("/a", 999, 5000).resume) << "publish time not reached";
+  EXPECT_FALSE(scheduler_->take_due("/a", 0, 5000).resume) << "a missing stamp never fires";
+  EXPECT_TRUE(scheduler_->take_due("/a", 1000, 0).resume);
+  EXPECT_FALSE(scheduler_->take_due("/a", 2000, 0).resume) << "each schedule fires once";
 
   scheduler_->schedule_at_message_time(Kind::Split, 1000, Mode::ReceiveTime, "");
-  EXPECT_FALSE(scheduler_->fired("/a", 5000, 999).split) << "receive time not reached";
-  EXPECT_TRUE(scheduler_->fired("/a", 0, 1000).split);
+  EXPECT_FALSE(scheduler_->take_due("/a", 5000, 999).split) << "receive time not reached";
+  EXPECT_TRUE(scheduler_->take_due("/a", 0, 1000).split);
 }
 
 TEST_F(SchedulerTest, a_tracking_topic_restricts_which_message_can_fire_it)
 {
   scheduler_->schedule_at_message_time(Kind::Resume, 100, Mode::ReceiveTime, "/scan");
-  EXPECT_FALSE(scheduler_->fired("/odom", 0, 500).resume);
-  EXPECT_TRUE(scheduler_->fired("/scan", 0, 500).resume);
+  EXPECT_FALSE(scheduler_->take_due("/odom", 0, 500).resume);
+  EXPECT_TRUE(scheduler_->take_due("/scan", 0, 500).resume);
 }
 
 TEST_F(SchedulerTest, clear_forgets_queued_schedules)
@@ -92,21 +92,21 @@ TEST_F(SchedulerTest, clear_forgets_queued_schedules)
   scheduler_->schedule_at_message_time(Kind::Resume, 100, Mode::ReceiveTime, "");
   scheduler_->schedule_at_message_time(Kind::Split, 100, Mode::ReceiveTime, "");
   scheduler_->clear();
-  const auto fired = scheduler_->fired("/a", 0, 500);
-  EXPECT_FALSE(fired.resume || fired.split);
+  const auto due = scheduler_->take_due("/a", 0, 500);
+  EXPECT_FALSE(due.resume || due.split);
 }
 
-TEST_F(SchedulerTest, a_node_time_timer_fires_once_and_the_newest_arming_wins)
+TEST_F(SchedulerTest, a_node_time_timer_fires_once_and_the_newest_schedule_wins)
 {
   bool first = false;
   bool second = false;
-  scheduler_->arm(Kind::Resume, std::chrono::milliseconds(20), [&]() {first = true;});
-  scheduler_->arm(Kind::Resume, std::chrono::milliseconds(40), [&]() {second = true;});
+  scheduler_->schedule_at_node_time(Kind::Resume, std::chrono::milliseconds(20), [&]() {first = true;});
+  scheduler_->schedule_at_node_time(Kind::Resume, std::chrono::milliseconds(40), [&]() {second = true;});
   EXPECT_TRUE(spin_until(second, std::chrono::seconds(2)));
   EXPECT_FALSE(first) << "the replaced timer must not fire";
 
   bool cleared = false;
-  scheduler_->arm(Kind::Split, std::chrono::milliseconds(20), [&]() {cleared = true;});
+  scheduler_->schedule_at_node_time(Kind::Split, std::chrono::milliseconds(20), [&]() {cleared = true;});
   scheduler_->clear();
   EXPECT_FALSE(spin_until(cleared, std::chrono::milliseconds(100)));
 }
@@ -117,9 +117,9 @@ TEST_F(SchedulerTest, pending_reports_each_schedule_until_it_fires)
 
   const auto before = node_->now().nanoseconds();
   bool resumed = false;
-  scheduler_->arm(Kind::Resume, std::chrono::milliseconds(30), [&]() {resumed = true;});
+  scheduler_->schedule_at_node_time(Kind::Resume, std::chrono::milliseconds(30), [&]() {resumed = true;});
   scheduler_->schedule_at_message_time(Kind::Split, 5000, Mode::ReceiveTime, "/scan");
-  scheduler_->arm(Kind::Record, std::chrono::seconds(60), []() {});
+  scheduler_->schedule_at_node_time(Kind::Record, std::chrono::seconds(60), []() {});
 
   auto pending = scheduler_->pending();
   ASSERT_EQ(pending.size(), 3u);
@@ -133,7 +133,7 @@ TEST_F(SchedulerTest, pending_reports_each_schedule_until_it_fires)
   EXPECT_EQ(pending[2].kind, Kind::Record);
 
   ASSERT_TRUE(spin_until(resumed, std::chrono::seconds(2)));
-  EXPECT_TRUE(scheduler_->fired("/scan", 0, 5000).split);
+  EXPECT_TRUE(scheduler_->take_due("/scan", 0, 5000).split);
   pending = scheduler_->pending();
   ASSERT_EQ(pending.size(), 1u) << "a fired schedule leaves the list, by timer or by message";
   EXPECT_EQ(pending[0].kind, Kind::Record);
@@ -146,15 +146,15 @@ TEST_F(SchedulerTest, the_newest_schedule_of_a_kind_wins_whichever_clock_it_is_o
 {
   // A message-time resume replaces a node-time one: the timer must not fire as well.
   bool by_timer = false;
-  scheduler_->arm(Kind::Resume, std::chrono::milliseconds(20), [&]() {by_timer = true;});
+  scheduler_->schedule_at_node_time(Kind::Resume, std::chrono::milliseconds(20), [&]() {by_timer = true;});
   scheduler_->schedule_at_message_time(Kind::Resume, 1000, Mode::PublishTime, "");
   EXPECT_FALSE(spin_until(by_timer, std::chrono::milliseconds(150)));
   ASSERT_EQ(scheduler_->pending().size(), 1u);
   EXPECT_EQ(scheduler_->pending()[0].mode, Mode::PublishTime);
 
   // And a node-time one replaces a message-time one: messages must no longer fire it.
-  scheduler_->arm(Kind::Resume, std::chrono::seconds(60), []() {});
-  EXPECT_FALSE(scheduler_->fired("/a", 2000, 2000).resume);
+  scheduler_->schedule_at_node_time(Kind::Resume, std::chrono::seconds(60), []() {});
+  EXPECT_FALSE(scheduler_->take_due("/a", 2000, 2000).resume);
   ASSERT_EQ(scheduler_->pending().size(), 1u);
   EXPECT_EQ(scheduler_->pending()[0].mode, Mode::NodeTime);
 }

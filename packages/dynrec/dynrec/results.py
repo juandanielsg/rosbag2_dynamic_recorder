@@ -14,16 +14,12 @@
 
 """What the calls hand back: plain data, not ROS messages.
 
-Returning the response message would be the least work and the worst interface. A script would
-then have to know that `messages_missed` is only meaningful when `sequence_numbers_available` is
-set, and the first script that forgets reports zero missing messages on a middleware that cannot
-count them -- a wrong number, in the one place this project cares most about being honest.
+The rule the CLI's `--json` and the browser UI rely on is enforced here, once: **a number the
+recorder cannot vouch for is None, never a convenient zero.** A raw `messages_missed` reads 0 on a
+middleware that cannot count gaps at all.
 
-So the rule the CLI's `--json` and the browser UI both encode is enforced here instead, once:
-**a number the recorder cannot vouch for is None, never a convenient zero.**
-
-No ROS import. The `from_msg` constructors only read attributes, so they can be exercised against
-any object carrying the right fields.
+No ROS import: the `from_msg` constructors only read attributes, so any object carrying the right
+fields will do in a test.
 """
 
 from dataclasses import asdict, dataclass, field
@@ -47,6 +43,11 @@ def _stamp_seconds(stamp):
     return stamp.sec + stamp.nanosec / NANOSECONDS_PER_SECOND
 
 
+def _action_name(names, msg):
+    """`msg.action` as a word, or as its number when the constant is one this library predates."""
+    return names.get(msg.action, str(msg.action))
+
+
 @dataclass(frozen=True)
 class Scheduled:
     """An operation the recorder will perform later: one entry of :attr:`Status.schedules`."""
@@ -64,7 +65,7 @@ class Scheduled:
     @classmethod
     def from_msg(cls, msg):
         return cls(
-            action=SCHEDULE_ACTIONS.get(msg.action, str(msg.action)),
+            action=_action_name(SCHEDULE_ACTIONS, msg),
             at=_stamp_seconds(msg.time),
             mode=SCHEDULE_MODES.get(msg.mode, str(msg.mode)),
             topic=msg.tracking_topic,
@@ -115,9 +116,9 @@ class Status:
     #: None when the middleware supplies no publication sequence numbers, i.e. when the recorder
     #: genuinely cannot tell. Never zero in that case -- zero would be a claim it cannot make.
     messages_missed: Optional[int]
-    #: Losses the transport *reported* before delivery. Observed reading 0 while ~3-4% of messages
-    #: were absent from a bag, so it is a floor, not a total. `messages_missed` is the honest one.
-    #: When this climbs, look at the publisher, its QoS, or the network.
+    #: Losses the transport *reported* before delivery: a floor, not a total, since the transport
+    #: can drop messages without reporting them. When this climbs, look at the publisher, its QoS,
+    #: or the network.
     messages_lost_in_transport: int
     #: Messages that reached the recorder and were then dropped by the writer: cache overflow
     #: because the disk could not keep up, or a failed storage write. Known-lost with certainty,
@@ -320,62 +321,38 @@ class Event:
     opened_file: str = ''
 
     @classmethod
-    def from_subscription_msg(cls, msg):
+    def _from_msg(cls, kind, action, msg, **fields):
+        """The fields every event message carries, plus the kind-specific `fields`."""
         return cls(
-            kind='subscription',
-            action=SUBSCRIPTION_ACTIONS.get(msg.action, str(msg.action)),
-            stamp=_stamp_seconds(msg.stamp),
-            reason=msg.reason,
-            node_name=msg.node_name,
-            topic=msg.topic_name,
-            topic_type=msg.topic_type,
-        )
+            kind=kind, action=action, stamp=_stamp_seconds(msg.stamp), reason=msg.reason,
+            node_name=msg.node_name, **fields)
+
+    @classmethod
+    def from_subscription_msg(cls, msg):
+        return cls._from_msg(
+            'subscription', _action_name(SUBSCRIPTION_ACTIONS, msg), msg,
+            topic=msg.topic_name, topic_type=msg.topic_type)
 
     @classmethod
     def from_pause_msg(cls, msg):
-        return cls(
-            kind='pause',
-            action=PAUSE_ACTIONS.get(msg.action, str(msg.action)),
-            stamp=_stamp_seconds(msg.stamp),
-            reason=msg.reason,
-            node_name=msg.node_name,
-        )
+        return cls._from_msg('pause', _action_name(PAUSE_ACTIONS, msg), msg)
 
     @classmethod
     def from_file_split_msg(cls, msg):
-        return cls(
-            kind='split',
-            action='split',
-            stamp=_stamp_seconds(msg.stamp),
-            reason=msg.reason,
-            node_name=msg.node_name,
-            closed_file=msg.closed_file,
-            opened_file=msg.opened_file,
-        )
+        return cls._from_msg(
+            'split', 'split', msg, closed_file=msg.closed_file, opened_file=msg.opened_file)
 
     @classmethod
     def from_low_disk_msg(cls, msg):
-        return cls(
-            kind='low_disk',
-            action=STOP_ACTIONS.get(msg.action, str(msg.action)),
-            stamp=_stamp_seconds(msg.stamp),
-            reason=msg.reason,
-            node_name=msg.node_name,
-            free_space_bytes=msg.free_space_bytes,
-            total_space_bytes=msg.total_space_bytes,
-        )
+        return cls._from_msg(
+            'low_disk', _action_name(STOP_ACTIONS, msg), msg,
+            free_space_bytes=msg.free_space_bytes, total_space_bytes=msg.total_space_bytes)
 
     @classmethod
     def from_bag_size_limit_msg(cls, msg):
-        return cls(
-            kind='bag_size_limit',
-            action=STOP_ACTIONS.get(msg.action, str(msg.action)),
-            stamp=_stamp_seconds(msg.stamp),
-            reason=msg.reason,
-            node_name=msg.node_name,
-            bag_size_bytes=msg.bag_size_bytes,
-            max_bag_size=msg.max_bag_size,
-        )
+        return cls._from_msg(
+            'bag_size_limit', _action_name(STOP_ACTIONS, msg), msg,
+            bag_size_bytes=msg.bag_size_bytes, max_bag_size=msg.max_bag_size)
 
 
 #: The recorder's event streams: topic suffix under the recorder's name, the message type in

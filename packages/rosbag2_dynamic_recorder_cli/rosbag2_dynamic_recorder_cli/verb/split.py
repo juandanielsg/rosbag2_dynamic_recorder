@@ -12,14 +12,13 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import time
-
-from rosbag2_dynamic_recorder_cli.format import add_schedule_arguments, format_duration
+from rosbag2_dynamic_recorder_cli.api import add_schedule_arguments
+from rosbag2_dynamic_recorder_cli.format import format_scheduled
 from rosbag2_dynamic_recorder_cli.verb import RecorderVerb
 
 
 class SplitVerb(RecorderVerb):
-    """Roll over to a new bag file, now or at a scheduled time."""
+    """Roll over to a new bag file, now or at a scheduled time. A stop clears the schedule."""
 
     def add_arguments(self, parser, cli_name):
         super().add_arguments(parser, cli_name)
@@ -27,10 +26,4 @@ class SplitVerb(RecorderVerb):
 
     def run(self, recorder, args):
         at = recorder.split(at=args.at, mode=args.mode, topic=args.topic)
-        # Schedules are cleared on stop, so one queued here cannot fire against a later
-        # recording -- worth knowing if you queue a split and then stop the bag.
-        if at is None:
-            print('split')
-        else:
-            print('split scheduled in {} ({} time)'.format(
-                format_duration(at - time.time()), args.mode))
+        print(format_scheduled('split', 'split', at, args.mode))

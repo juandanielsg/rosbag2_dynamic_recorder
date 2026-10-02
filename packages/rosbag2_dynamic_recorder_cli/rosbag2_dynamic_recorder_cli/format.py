@@ -12,39 +12,28 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Turning recorder state into text, and defining the scheduling arguments.
+"""Turning recorder state and bag reports into text for a terminal.
 
-Pure functions with no ROS dependency beyond the message fields they read, so the rules below can
-be tested directly. The rule worth protecting is the same one the browser UI encodes: a number the
-recorder cannot vouch for is reported as unknown, never as a convenient zero.
-
-The time dialect and the mode mapping are dynrec.schedule's -- the verbs hand `--at` straight to
-`dynrec.Recorder`, so there is no second copy here to drift from it.
+Pure functions with no ROS dependency beyond the fields they read, so they can be tested directly.
+As in the browser UI, a number the recorder cannot vouch for reads as unknown, never as zero.
 """
 
+import time
 from datetime import datetime
-
-from dynrec.schedule import TIME_MODES
 
 #: Width of the label column in `status`: the longest label, 'lost (transport):', plus a gap.
 LABEL_WIDTH = 14
 
 
-def add_schedule_arguments(parser, noun):
-    """The --at/--mode/--topic trio shared by `resume` and `split`."""
-    parser.add_argument(
-        '--at', metavar='TIME', default=None,
-        help='Schedule the {} for a future time instead of doing it now. Accepts +30s, 14:05, '
-             '2026-09-03T14:05, or epoch seconds'.format(noun))
-    parser.add_argument(
-        '--mode', choices=sorted(TIME_MODES), default='node',
-        help='Clock the scheduled time is compared against (default: %(default)s). '
-             'node fires on a timer and works on a robot that has gone quiet; publish and '
-             'receive are evaluated as messages arrive and cannot fire without traffic')
-    parser.add_argument(
-        '--topic', metavar='TOPIC', default='',
-        help='For publish and receive mode, evaluate against this topic only. It must be one '
-             'the recorder is subscribed to. Default: any recorded topic')
+def format_scheduled(done, noun, at, mode=None):
+    """What a verb that can be scheduled prints: `done` when it happened now, else when it will.
+
+    `at` is the epoch time dynrec returned for a scheduled call, or None for an immediate one.
+    """
+    if at is None:
+        return done
+    text = '{} scheduled in {}'.format(noun, format_duration(at - time.time()))
+    return text + (' ({} time)'.format(mode) if mode else '')
 
 
 def format_duration(seconds):
@@ -190,4 +179,43 @@ def format_status(status):
     for index, scheduled in enumerate(status.schedules):
         lines.append(_row('scheduled' if index == 0 else '',
                           format_schedule(scheduled, status.use_sim_time)))
+    return lines
+
+
+def format_bag_summary(summary):
+    """A :class:`dynrec.BagSummary` as lines of text: one row per channel, then pauses and
+    warnings."""
+    if not summary.channels:
+        return ['{}: nothing to report'.format(summary.uri)] + list(summary.warnings)
+
+    def seconds(value):
+        return '?' if value is None else '{:.1f}s'.format(value)
+
+    row = '{:<34}{:>8}{:>10}{:>9}{:>11}{:>12}{}'
+    lines = [
+        '{}  {:.1f}s  {} messages on {} channels'.format(
+            summary.uri, summary.duration,
+            sum(channel.count for channel in summary.channels), len(summary.channels)),
+        '',
+        row.format('topic', 'msgs', 'recorded', 'active', 'rate', 'averaged', ''),
+    ]
+    for channel in summary.channels:
+        lines.append(row.format(
+            channel.topic, channel.count, seconds(channel.recorded_seconds),
+            seconds(channel.active_seconds),
+            'unknown' if channel.rate is None else '{:.2f} Hz'.format(channel.rate),
+            '{:.2f} Hz'.format(channel.averaged_rate),
+            '' if channel.basis == 'events' else '  ({})'.format(channel.basis)))
+    lines += ['',
+              'recorded is how long the channel was subscribed and not paused; active trims that',
+              'to when messages were really arriving, and rate is counted over active.',
+              'averaged is count over the whole bag -- what ros2 bag info and mcap info report.']
+    if summary.pause_windows:
+        lines += ['', 'paused:']
+        for begin, end in summary.pause_windows:
+            lines.append('  {:.1f}s to {:.1f}s  ({:.2f}s)'.format(
+                begin - summary.start, end - summary.start, end - begin))
+    if summary.warnings:
+        lines.append('')
+        lines += ['warning: ' + warning for warning in summary.warnings]
     return lines

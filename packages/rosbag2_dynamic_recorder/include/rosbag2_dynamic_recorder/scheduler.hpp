@@ -15,6 +15,7 @@
 #ifndef ROSBAG2_DYNAMIC_RECORDER__SCHEDULER_HPP_
 #define ROSBAG2_DYNAMIC_RECORDER__SCHEDULER_HPP_
 
+#include <array>
 #include <atomic>
 #include <chrono>
 #include <cstdint>
@@ -32,102 +33,85 @@ namespace rosbag2_dynamic_recorder
 
 /// Resume, split and record requests asked for at a future time rather than immediately.
 ///
-/// Two mechanisms, because they answer different needs. A node-time schedule is a one-shot
-/// timer, so it fires even on a silent robot. A publish- or receive-time schedule can only be
-/// evaluated against arriving messages, so it is checked from the message path and will not
-/// fire if the traffic stops. Only the newest schedule of each kind is live, whichever clock
-/// either was set on: one slot per kind holds it, and a new one replaces the old timer or queued
-/// message-time check. The slots are also what pending() reports, so the status can show them.
+/// A node-time schedule is a one-shot timer, so it fires even on a silent robot. A publish- or
+/// receive-time schedule can only be checked against arriving messages, so it fires from the
+/// message path and never if traffic stops. Each kind has one slot: a new schedule replaces the
+/// pending one, whichever clock either was set on.
 ///
-/// Timers run in the callback group given at construction, which the recorder shares with its
-/// services; that group is MutuallyExclusive, and rclcpp holds it from TimerBase::call() to the
-/// callback, so a cancelled timer's callback never runs and nothing here needs an epoch.
+/// Timers run in the callback group given at construction. The recorder shares that
+/// MutuallyExclusive group with its services, and rclcpp holds it from TimerBase::call() to the
+/// callback, so a cancelled timer's callback never runs.
 class Scheduler
 {
 public:
   enum class Kind { Resume, Split, Record };
 
-  /// The clock a scheduled time is compared against, as the services encode it.
+  /// The clock a scheduled time is compared against, numbered as the services number it.
   enum class Mode : int32_t { NodeTime = 0, PublishTime = 1, ReceiveTime = 2 };
 
   /// A request's mode field as a Mode, or nothing for a value the services do not define.
   static std::optional<Mode> mode_from(int32_t value);
 
-  struct Fired
+  /// A schedule waiting to fire.
+  struct Scheduled
+  {
+    Kind kind;
+    /// When it fires, on the clock `mode` names.
+    rcutils_time_point_value_t at_ns;
+    Mode mode;
+    /// Message time only: the topic whose messages are checked. Empty means any.
+    std::string tracking_topic;
+  };
+
+  /// The message-time schedules one message has fired.
+  struct Due
   {
     bool resume{false};
     bool split{false};
   };
 
-  /// A schedule still waiting to fire, as the status reports it.
-  struct Scheduled
-  {
-    Kind kind;
-    /// When it fires, on the clock `mode` names; for NodeTime, the node clock.
-    rcutils_time_point_value_t at_ns;
-    Mode mode;
-    std::string tracking_topic;
-  };
-
   Scheduler(rclcpp::Node & node, rclcpp::CallbackGroup::SharedPtr group);
 
-  /// Arm a one-shot node-time timer for `kind` to fire `delta` from now on the node clock,
-  /// replacing any pending schedule of that kind.
-  void arm(Kind kind, std::chrono::nanoseconds delta, std::function<void()> action);
+  /// Run `action` once, `delay` from now on the node clock, so under use_sim_time it keeps to the
+  /// simulation's time.
+  void schedule_at_node_time(Kind kind, std::chrono::nanoseconds delay, std::function<void()> action);
 
-  /// Queue a resume or split against message time, replacing any pending schedule of that kind.
-  /// `tracking_topic` empty means any topic.
+  /// Fire a resume or split on the first message stamped at or after `at_ns`.
   void schedule_at_message_time(
     Kind kind, rcutils_time_point_value_t at_ns, Mode mode, const std::string & tracking_topic);
 
-  /// Every schedule still waiting to fire: resume, split, record, in that order, at most one each.
+  /// Every schedule waiting to fire, in Kind order.
   std::vector<Scheduled> pending() const;
 
-  /// From the message path: which message-time schedules this message satisfies. Each fires
-  /// once. Cheap when nothing is queued: one relaxed load and no lock.
-  Fired fired(
+  /// Called for every recorded message: the message-time schedules it fires, each only once.
+  /// Takes no lock while no message-time schedule is pending.
+  Due take_due(
     const std::string & topic, rcutils_time_point_value_t send_ns,
     rcutils_time_point_value_t recv_ns);
 
-  /// Forget every pending resume and split. A split queued against a bag that has since been
-  /// closed, or a resume queued before a stop, must not fire against the next recording. A
-  /// scheduled record is left alone: it exists precisely to run while stopped.
+  /// Drop every pending resume and split, so none fires against the next recording. A scheduled
+  /// record is kept: it exists to run while stopped.
   void clear();
 
 private:
-  struct Pending
+  struct Slot
   {
-    bool active{false};
-    rcutils_time_point_value_t at_ns{0};
-    Mode mode{Mode::NodeTime};
-    std::string tracking_topic;
-
-    bool satisfied_by(
-      const std::string & topic, rcutils_time_point_value_t send_ns,
-      rcutils_time_point_value_t recv_ns) const;
+    rclcpp::TimerBase::SharedPtr timer;
+    std::optional<Scheduled> scheduled;  // Under mutex_.
   };
 
-  rclcpp::TimerBase::SharedPtr & slot(Kind kind);
-  /// The schedule of `kind`; mutex_ held.
-  Pending & pending_for(Kind kind);
-  /// Recompute pending_ from the slots; mutex_ held.
-  void update_fast_path_locked();
+  Slot & slot(Kind kind) {return slots_[static_cast<size_t>(kind)];}
+  /// Cancel `kind`'s timer and put `scheduled` in its slot.
+  void replace(Kind kind, Scheduled scheduled);
+  /// Recompute message_time_pending_; mutex_ held.
+  void update_message_time_pending();
 
   rclcpp::Node & node_;
   rclcpp::CallbackGroup::SharedPtr group_;
-  rclcpp::TimerBase::SharedPtr resume_timer_;
-  rclcpp::TimerBase::SharedPtr split_timer_;
-  rclcpp::TimerBase::SharedPtr record_timer_;
-
   mutable std::mutex mutex_;
-  Pending resume_;
-  Pending split_;
-  /// Node time only: Record has no mode field.
-  Pending record_;
-  /// Fast path for the message callback: false means no message-time schedule can fire, so
-  /// fired() returns without taking the lock on every arriving message. A pending node-time
-  /// schedule leaves it false, since only its timer can fire it.
-  std::atomic_bool pending_{false};
+  std::array<Slot, 3> slots_;
+  /// False when no message-time schedule can fire, so take_due() returns without the lock.
+  std::atomic_bool message_time_pending_{false};
 };
 
 }  // namespace rosbag2_dynamic_recorder

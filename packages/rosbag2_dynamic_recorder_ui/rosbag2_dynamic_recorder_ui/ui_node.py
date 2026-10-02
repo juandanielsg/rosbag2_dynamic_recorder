@@ -53,6 +53,13 @@ HIDDEN_TOPICS = {"/parameter_events", "/rosout"}
 #: publishes every second by default, so this is several missed ticks, not one late one.
 STALE_AFTER_SECONDS = 5.0
 
+#: The page's files, by request path: a fixed list, so no request can reach any other file.
+STATIC_FILES = {
+    "/index.html": ("index.html", "text/html; charset=utf-8"),
+    "/style.css": ("style.css", "text/css; charset=utf-8"),
+    "/app.js": ("app.js", "text/javascript; charset=utf-8"),
+}
+
 #: How often to retry ~/get_profiles while the recorder is not answering yet.
 PROFILES_RETRY_SECONDS = 5.0
 
@@ -284,12 +291,13 @@ class _Handler(BaseHTTPRequestHandler):
         self._send(code, json.dumps(payload).encode(), "application/json")
 
     def do_GET(self):
-        if self.path in ("/", "/index.html"):
-            page = self.web_root / "index.html"
+        static = STATIC_FILES.get("/index.html" if self.path == "/" else self.path)
+        if static is not None:
+            name, content_type = static
             try:
-                self._send(200, page.read_bytes(), "text/html; charset=utf-8")
+                self._send(200, (self.web_root / name).read_bytes(), content_type)
             except OSError as exc:
-                self._send(500, f"cannot read {page}: {exc}".encode(), "text/plain")
+                self._send(500, f"cannot read {name}: {exc}".encode(), "text/plain")
         elif self.path == "/api/state":
             self._send_json(self.node.snapshot_state())
         else:

@@ -14,29 +14,13 @@
 
 """Reading a recorded bag back, and answering what each channel really did.
 
-This exists because of a number that is wrong in every tool that reports it. `mcap info` and
-`ros2 bag info` compute a channel's rate as its message count over the *whole bag duration*, so a
-topic that published at 20 Hz for eleven seconds and was then unsubscribed is reported at 5.95 Hz.
-Nothing is corrupted; the summary line simply describes a healthy sensor as a slow one, which is
-precisely the misreading this project exists to prevent.
+`mcap info` and `ros2 bag info` compute a channel's rate as its count over the whole bag, so a
+topic that published at 20 Hz for a quarter of the bag reads as 5 Hz. Dividing by the channel's
+own first-to-last span fixes a channel that stopped, but not one with a hole in the middle; only
+the recorder's own events locate those holes.
 
-The obvious fix -- divide by the channel's own first-to-last span instead -- only half works, and
-the half it misses is the interesting one:
-
-    topic      msgs   whole bag    own span   subscribed
-    alpha       590     16.12 Hz    16.12 Hz     19.99 Hz
-    beta        218      5.95 Hz    19.87 Hz     19.78 Hz
-    gamma       365      9.97 Hz    14.46 Hz     20.07 Hz
-    delta        80      2.19 Hz    20.25 Hz     20.06 Hz
-
-All four published at 20 Hz. Span arithmetic fixes the channels that *stopped* (beta, delta) and
-cannot fix the ones with a hole in the middle (alpha, whose span is the whole bag; gamma, whose
-span still contains the pause). Only the recorder's own events locate those holes -- which is why
-this lives here rather than as a patch to somebody else's summary line.
-
-The rule this module holds to is the project's: when the bag does not carry what is needed, the
-answer is unknown rather than a plausible number. `ChannelStats.rate` is None in that case, and
-`basis` says which evidence was available.
+When the bag does not carry what is needed, the answer is unknown rather than a plausible number:
+`ChannelStats.rate` is None, and `basis` says which evidence was available.
 """
 
 from dataclasses import dataclass, field
@@ -45,8 +29,8 @@ from typing import List, Optional, Tuple
 from dynrec.results import EVENT_STREAMS, Event
 from dynrec.schedule import NANOSECONDS_PER_SECOND
 
-#: How much of a simultaneous, unexplained hole is worth mentioning. Below this, ordinary
-#: scheduling jitter across a handful of topics would raise a permanent false alarm.
+#: How long a simultaneous, unexplained hole must be to be reported. Below this, scheduling
+#: jitter across a handful of topics would raise a permanent false alarm.
 UNEXPLAINED_GAP_SECONDS = 1.0
 
 
@@ -61,23 +45,19 @@ class ChannelStats:
     first: float
     last: float
     #: Seconds this channel was subscribed and the recorder was not paused. None when the bag
-    #: does not carry the events needed to work it out. This is how long it was *being recorded*.
+    #: does not carry the events needed to work it out.
     recorded_seconds: Optional[float]
-    #: The same, further trimmed to the span in which messages actually arrived. Shorter than
-    #: `recorded_seconds` by the subscription warm-up, and by any silence before the bag closed.
-    #: A large gap between the two is itself a finding: a sensor that went quiet while still
-    #: subscribed looks exactly like that.
+    #: The same, trimmed to the span in which messages actually arrived. A large difference from
+    #: `recorded_seconds` is itself a finding: a sensor that went quiet while still subscribed.
     active_seconds: Optional[float]
-    #: Messages per second over `active_seconds` -- the rate the publisher was actually running
-    #: at, rather than one diluted by the moments around it. None when it cannot be determined.
+    #: Messages per second over `active_seconds`: the rate the publisher actually ran at. None
+    #: when it cannot be determined.
     rate: Optional[float]
-    #: Count over the whole bag duration -- what `mcap info` and `ros2 bag info` report. Kept so
-    #: the two can be compared, since the gap between them is the entire point.
+    #: Count over the whole bag duration, as `mcap info` and `ros2 bag info` report it.
     averaged_rate: float
-    #: Which evidence was available. ``events`` means subscription events located the windows and
-    #: the rate is trustworthy. ``span`` means no event names this topic, so its own first-to-last
-    #: span was used instead -- right for a channel that merely stopped, wrong for one with an
-    #: interior hole. ``unknown`` means there was not enough evidence for any answer.
+    #: ``events`` when subscription events located the windows and the rate is trustworthy;
+    #: ``span`` when no event names this topic and its own first-to-last span was used, which is
+    #: wrong for a channel with an interior hole; ``unknown`` when there was no evidence at all.
     basis: str
     #: The whole bag's duration, so `sparse` has something to compare against.
     bag_seconds: float = 0.0
@@ -100,38 +80,70 @@ class BagSummary:
     pause_windows: List[Tuple[float, float]] = field(default_factory=list)
     #: Every recorder event in the bag, oldest first.
     events: List[Event] = field(default_factory=list)
-    #: Simultaneous holes across every live channel that no PauseEvent accounts for. A crash, a
-    #: stall, or a pause recorded with `record_pause_events:=false` all look like this.
+    #: Holes shared by every live channel that no PauseEvent accounts for: a crash, a stall, or a
+    #: pause recorded with `record_pause_events:=false`.
     unexplained_gaps: List[Tuple[float, float]] = field(default_factory=list)
-    #: The LowDiskEvent if the recorder stopped itself because free space fell below the configured
-    #: minimum, else None. Absence means either it did not stop that way, or the event was not
-    #: recorded (`record_low_disk_events:=false`); the two cannot be told apart from the bag alone.
+    #: The LowDiskEvent if the recorder stopped itself for free space, else None. None also when
+    #: the event was not recorded (`record_low_disk_events:=false`).
     low_disk_stop: Optional[Event] = None
-    #: The BagSizeLimitEvent if the recorder stopped itself because the bag grew past
-    #: `max_bag_size`, else None. Same caveat: absence may mean
-    #: `record_bag_size_limit_events:=false`.
+    #: The BagSizeLimitEvent if the recorder stopped itself at `max_bag_size`, else None. Same
+    #: caveat (`record_bag_size_limit_events:=false`).
     bag_size_limit_stop: Optional[Event] = None
-    #: Things the reader could not establish, in the words a reader of the report needs.
+    #: Things the reader could not establish, worded for a reader of the report.
     warnings: List[str] = field(default_factory=list)
 
     @property
     def duration(self):
         return self.end - self.start
 
+    def as_dict(self):
+        """The report as plain data, times relative to the bag's start, unknown values as None."""
+        def relative(windows):
+            return [{'start': a - self.start, 'end': b - self.start} for a, b in windows]
 
-# -- the judgement, kept free of ROS so it can be tested without a bag -------------------------
+        return {
+            'uri': self.uri,
+            'duration_seconds': self.duration,
+            'channels': [
+                {
+                    'topic': channel.topic,
+                    'type': channel.message_type,
+                    'count': channel.count,
+                    'recorded_seconds': channel.recorded_seconds,
+                    'active_seconds': channel.active_seconds,
+                    'rate': channel.rate,
+                    'averaged_rate': channel.averaged_rate,
+                    'basis': channel.basis,
+                }
+                for channel in self.channels
+            ],
+            'pause_windows': relative(self.pause_windows),
+            'unexplained_gaps': relative(self.unexplained_gaps),
+            'stopped_for_low_disk': self.low_disk_stop is not None,
+            'stopped_for_max_bag_size': self.bag_size_limit_stop is not None,
+            'warnings': list(self.warnings),
+        }
+
+
+# -- interval arithmetic, free of ROS so it can be tested without a bag -------------------------
 
 
 def merge_windows(windows):
-    """Collapse overlapping or touching intervals into the smallest equivalent set."""
-    ordered = sorted((a, b) for a, b in windows if b > a)
+    """Collapse overlapping or touching intervals into the smallest equivalent set, dropping
+    empty ones."""
     merged = []
-    for start, end in ordered:
+    for start, end in sorted((a, b) for a, b in windows if b > a):
         if merged and start <= merged[-1][1]:
             merged[-1] = (merged[-1][0], max(merged[-1][1], end))
         else:
             merged.append((start, end))
-    return [tuple(window) for window in merged]
+    return merged
+
+
+def intersect_windows(first, second):
+    """The intervals covered by both sets."""
+    return merge_windows(
+        (max(a[0], b[0]), min(a[1], b[1])) for a in first for b in second)
 
 
 def overlap(first, second):
@@ -139,74 +151,39 @@ def overlap(first, second):
     return max(0.0, min(first[1], second[1]) - max(first[0], second[0]))
 
 
-def subscribed_windows(events, topic, bag_end):
-    """When `topic` was subscribed, from the subscription events in the bag.
-
-    A window left open at the end of the bag is closed at the bag's end rather than dropped: the
-    recorder was still recording that topic when the bag stopped, and treating that as "never
-    closed, so unknown" would discard the most ordinary case there is.
-    """
+def _event_windows(events, matches, opening, closing, end):
+    """Intervals from each `opening` event to the next `closing` one, among events `matches`
+    accepts. One still open at the end is closed at `end`. A repeated opening keeps the earlier
+    stamp rather than restarting the window."""
     windows = []
     opened = None
     for event in sorted(events, key=lambda e: e.stamp):
-        if event.kind != 'subscription' or event.topic != topic:
+        if not matches(event):
             continue
-        if event.action == 'subscribed':
-            # Two SUBSCRIBED in a row should not happen; if it does, keep the earlier one rather
-            # than silently restarting the window and under-reporting the time recorded.
-            if opened is None:
-                opened = event.stamp
-        elif event.action == 'unsubscribed' and opened is not None:
+        if event.action == opening and opened is None:
+            opened = event.stamp
+        elif event.action == closing and opened is not None:
             windows.append((opened, event.stamp))
             opened = None
     if opened is not None:
-        windows.append((opened, bag_end))
+        windows.append((opened, end))
     return merge_windows(windows)
+
+
+def subscribed_windows(events, topic, bag_end):
+    """When `topic` was subscribed, from the subscription events in the bag. Still subscribed at
+    the end means subscribed until `bag_end`."""
+    return _event_windows(
+        events, lambda e: e.kind == 'subscription' and e.topic == topic,
+        'subscribed', 'unsubscribed', bag_end)
 
 
 def pause_windows(events, bag_end=None):
-    """When the recorder was paused, from the pause events in the bag.
-
-    A PAUSED still open at the end is closed at `bag_end`: the recording ended while paused, and
-    everything after that instant was genuinely not being written. Without a `bag_end` the last
-    event stands in for it, which in practice is the PAUSED event itself -- a paused recorder
-    writes nothing else -- so the window is empty and nothing is wrongly deducted.
-    """
-    windows = []
-    opened = None
-    stamps = [e.stamp for e in events] or [0.0]
-    for event in sorted(events, key=lambda e: e.stamp):
-        if event.kind != 'pause':
-            continue
-        if event.action == 'paused':
-            if opened is None:
-                opened = event.stamp
-        elif event.action == 'resumed' and opened is not None:
-            windows.append((opened, event.stamp))
-            opened = None
-    if opened is not None:
-        windows.append((opened, bag_end if bag_end is not None else max(stamps)))
-    return merge_windows(windows)
-
-
-def clip_windows(windows, bounds):
-    """Trim windows to `bounds`, dropping any part outside it.
-
-    Used to cut a subscribed window down to when the channel was actually delivering. Subscribing
-    is not instantaneous -- the first message cannot arrive until the topic's message definition
-    has been resolved -- ~0.4-0.6s per new topic by measurement, nearly all of it definition
-    resolution (a nested `sensor_msgs/Imu` cost 300-470ms against 71ms for `std_msgs/String`) --
-    and DDS matching adds more. Counting that silence as time the channel was producing messages
-    would report a healthy 20 Hz sensor at 16 Hz purely because it was subscribed shortly before
-    it started arriving.
-    """
-    clipped = []
-    for start, end in windows:
-        low = max(start, bounds[0])
-        high = min(end, bounds[1])
-        if high > low:
-            clipped.append((low, high))
-    return merge_windows(clipped)
+    """When the recorder was paused, from the pause events in the bag. Still paused at the end
+    means paused until `bag_end`, or, without one, until the last event."""
+    if bag_end is None:
+        bag_end = max((e.stamp for e in events), default=0.0)
+    return _event_windows(events, lambda e: e.kind == 'pause', 'paused', 'resumed', bag_end)
 
 
 def live_seconds(windows, pauses):
@@ -219,67 +196,49 @@ def live_seconds(windows, pauses):
 
 
 def rate_over(count, seconds):
-    """Messages per second, or None when there is no interval to divide by.
-
-    A single message spans no time, so its rate is genuinely unknown rather than infinite -- and
-    reporting it as unknown is the same rule the rest of this project follows.
-    """
+    """Messages per second, or None when there is no interval to divide by."""
     if seconds is None or seconds <= 0.0:
         return None
     return count / seconds
 
 
 def unexplained_gaps(channel_gaps, pauses, threshold=UNEXPLAINED_GAP_SECONDS):
-    """Holes that every live channel shares and no pause accounts for.
+    """Holes that every channel shares and no pause accounts for.
 
-    `channel_gaps` is one list of (start, end) per channel. A hole in a single channel is ordinary
-    -- it is what unsubscribing looks like, and the subscription events explain it. A hole in
-    *every* channel at once is the signature the recorder writes PauseEvents to explain, so one
-    with no PauseEvent behind it is worth surfacing: a crash, a stall, or a pause recorded with
-    `record_pause_events:=false` all look exactly like this.
+    `channel_gaps` is one list of (start, end) per channel. A hole in one channel is what
+    unsubscribing looks like; a hole in every channel at once is what a pause looks like, so one
+    with no PauseEvent behind it is worth reporting.
     """
     if not channel_gaps:
         return []
     shared = merge_windows(channel_gaps[0])
     for gaps in channel_gaps[1:]:
-        overlapping = []
-        for candidate in merge_windows(gaps):
-            for existing in shared:
-                start = max(candidate[0], existing[0])
-                end = min(candidate[1], existing[1])
-                if end - start > 0:
-                    overlapping.append((start, end))
-        shared = merge_windows(overlapping)
+        shared = intersect_windows(shared, gaps)
         if not shared:
             return []
-    merged_pauses = merge_windows(pauses)
+    pauses = merge_windows(pauses)
     return [
         window for window in shared
         if window[1] - window[0] >= threshold
-        and not any(overlap(window, p) > (window[1] - window[0]) / 2 for p in merged_pauses)
+        and not any(overlap(window, p) > (window[1] - window[0]) / 2 for p in pauses)
     ]
 
 
 def gaps_in(stamps, threshold):
-    """Intervals between consecutive messages longer than `threshold`."""
+    """Intervals between consecutive messages at least `threshold` long."""
     ordered = sorted(stamps)
-    return [
-        (first, second) for first, second in zip(ordered, ordered[1:])
-        if second - first >= threshold
-    ]
+    return [(a, b) for a, b in zip(ordered, ordered[1:]) if b - a >= threshold]
 
 
-# -- reading the bag ---------------------------------------------------------------------------
+# -- reading the bag ----------------------------------------------------------------------------
 
 
 def describe(uri, storage_id=''):
     """Read a bag and report what each channel really did.
 
-    `storage_id` is normally best left empty, which lets rosbag2 detect it from the bag's own
-    metadata; pass one only when that fails.
+    Leave `storage_id` empty to let rosbag2 detect it from the bag's metadata.
 
-    Needs `rosbag2_py`, which is imported here rather than at module scope so that everything
-    above stays importable -- and testable -- without a ROS installation.
+    Needs `rosbag2_py`, imported here so that everything above stays importable without ROS.
     """
     from rclpy.serialization import deserialize_message
     from rosidl_runtime_py.utilities import get_message
@@ -290,31 +249,22 @@ def describe(uri, storage_id=''):
         rosbag2_py.StorageOptions(uri=str(uri), storage_id=storage_id),
         rosbag2_py.ConverterOptions('', ''))
     types = {topic.name: topic.type for topic in reader.get_all_topics_and_types()}
-    # The recorder's event channels, by name, with the Event constructor that decodes each. Every
-    # other channel is data.
+    # The recorder's event channels, with the Event constructor for each. Every other is data.
     event_parsers = {
         name: parse
         for name in types
         for suffix, (_, parse) in EVENT_STREAMS.items() if name.endswith(suffix)
     }
 
-    # read_next() is deprecated in favour of read_next_ext(), which returns the send timestamp as
-    # well as the receive one. The receive timestamp is the one taken here either way: it is the
-    # bag's log_time, and therefore the same clock `ros2 bag info` and `mcap info` measure a bag's
-    # duration on -- which is what makes the honest and averaged rates below comparable. It is
-    # also the only one on the simulation's clock in a bag recorded under use_sim_time; the send
-    # stamp is the middleware's, and always wall time.
+    # The receive stamp throughout: it is the bag's log time, the clock `ros2 bag info` measures
+    # duration on, and under use_sim_time the only one on the simulation's clock. read_next() is
+    # deprecated where read_next_ext() exists.
     extended = hasattr(reader, 'read_next_ext')
-
     stamps = {name: [] for name in types}
     events = []
     while reader.has_next():
-        if extended:
-            topic, data, nanoseconds, _send_ns = reader.read_next_ext()
-        else:
-            topic, data, nanoseconds = reader.read_next()
-        seconds = nanoseconds / NANOSECONDS_PER_SECOND
-        stamps.setdefault(topic, []).append(seconds)
+        topic, data, nanoseconds = reader.read_next_ext()[:3] if extended else reader.read_next()
+        stamps.setdefault(topic, []).append(nanoseconds / NANOSECONDS_PER_SECOND)
         parse = event_parsers.get(topic)
         if parse:
             events.append(parse(deserialize_message(data, get_message(types[topic]))))
@@ -328,30 +278,22 @@ def describe(uri, storage_id=''):
     end = max(max(values) for values in populated.values())
     duration = end - start
     events.sort(key=lambda event: event.stamp)
-
     pauses = pause_windows(events, bag_end=end)
-    has_subscription_events = any(event.kind == 'subscription' for event in events)
-    has_pause_events = any(event.kind == 'pause' for event in events)
 
     channels = []
-    data_topics = sorted(name for name in populated if name not in event_parsers)
-    for topic in data_topics:
+    for topic in sorted(name for name in populated if name not in event_parsers):
         values = sorted(populated[topic])
         windows = subscribed_windows(events, topic, end)
         if windows:
             basis = 'events'
             recorded = live_seconds(windows, pauses)
-            active = live_seconds(clip_windows(windows, (values[0], values[-1])), pauses)
+            active = live_seconds(intersect_windows(windows, [(values[0], values[-1])]), pauses)
         elif len(values) > 1:
-            # No events name this topic, so the best available evidence is when its messages
-            # actually arrived. Right for a channel that stopped, wrong for one with a hole.
             basis = 'span'
-            recorded = live_seconds([(values[0], values[-1])], pauses)
-            active = recorded
+            recorded = active = live_seconds([(values[0], values[-1])], pauses)
         else:
             basis = 'unknown'
-            recorded = None
-            active = None
+            recorded = active = None
         channels.append(ChannelStats(
             topic=topic,
             message_type=types.get(topic, ''),
@@ -366,21 +308,32 @@ def describe(uri, storage_id=''):
             bag_seconds=duration,
         ))
 
-    # A hole is only "shared" if it is shared by channels that were live to begin with, so a
-    # channel that had already been unsubscribed cannot make every gap look simultaneous.
-    live_gaps = [
-        gaps_in(populated[channel.topic], UNEXPLAINED_GAP_SECONDS)
-        for channel in channels if channel.count > 1
-    ]
-    unexplained = unexplained_gaps(live_gaps, pauses)
+    # Only channels with gaps to compare can share one.
+    unexplained = unexplained_gaps(
+        [gaps_in(populated[c.topic], UNEXPLAINED_GAP_SECONDS) for c in channels if c.count > 1],
+        pauses)
 
+    def last_event(kind):
+        return next((event for event in reversed(events) if event.kind == kind), None)
+
+    low_disk_stop = last_event('low_disk')
+    bag_size_limit_stop = last_event('bag_size_limit')
+    return BagSummary(
+        uri=str(uri), start=start, end=end, channels=channels, pause_windows=pauses,
+        events=events, unexplained_gaps=unexplained, low_disk_stop=low_disk_stop,
+        bag_size_limit_stop=bag_size_limit_stop,
+        warnings=_warnings(events, start, unexplained, low_disk_stop, bag_size_limit_stop))
+
+
+def _warnings(events, start, unexplained, low_disk_stop, bag_size_limit_stop):
+    """What a reader of the report needs to know the bag could not establish, or why it ended."""
     warnings = []
-    if not has_subscription_events:
+    if not any(event.kind == 'subscription' for event in events):
         warnings.append(
             'this bag carries no subscription events, so each channel was measured over its own '
             'first-to-last span. That is right for a channel that stopped and wrong for one with '
             'a hole in the middle. Was it recorded with record_subscription_events:=false?')
-    if not has_pause_events:
+    if not any(event.kind == 'pause' for event in events):
         warnings.append(
             'this bag carries no pause events. Either the recorder was never paused, or it ran '
             'with record_pause_events:=false -- the bag cannot tell those apart, because the '
@@ -391,102 +344,16 @@ def describe(uri, storage_id=''):
             'event explains it. A crash, a stall, or a pause recorded with '
             'record_pause_events:=false all look like this.'.format(
                 gap_end - gap_start, gap_start - start))
-
-    def last_event(kind):
-        return next((event for event in reversed(events) if event.kind == kind), None)
-
-    low_disk_stop = last_event('low_disk')
     if low_disk_stop is not None:
         warnings.append(
             'this recording ended because free space on the bag filesystem fell below the '
             'configured minimum ({} bytes available of {}). The recorder stopped itself to leave '
             'the disk usable, so the end of the bag is deliberate rather than a crash or a power '
             'loss.'.format(low_disk_stop.free_space_bytes, low_disk_stop.total_space_bytes))
-
-    bag_size_limit_stop = last_event('bag_size_limit')
     if bag_size_limit_stop is not None:
         warnings.append(
             'this recording ended because the bag reached its configured size limit ({} bytes on '
             'disk, limit {}). The recorder stopped itself, so the end of the bag is deliberate '
             'rather than a crash or a power loss.'.format(
                 bag_size_limit_stop.bag_size_bytes, bag_size_limit_stop.max_bag_size))
-
-    return BagSummary(
-        uri=str(uri), start=start, end=end, channels=channels, pause_windows=pauses,
-        events=events, unexplained_gaps=unexplained, low_disk_stop=low_disk_stop,
-        bag_size_limit_stop=bag_size_limit_stop, warnings=warnings)
-
-
-def format_summary(summary):
-    """The report as lines of text, for a terminal."""
-    if not summary.channels:
-        return ['{}: nothing to report'.format(summary.uri)] + list(summary.warnings)
-
-    lines = [
-        '{}  {:.1f}s  {} messages on {} channels'.format(
-            summary.uri, summary.duration,
-            sum(channel.count for channel in summary.channels), len(summary.channels)),
-        '',
-        '{:<34}{:>8}{:>10}{:>9}{:>11}{:>12}'.format(
-            'topic', 'msgs', 'recorded', 'active', 'rate', 'averaged'),
-    ]
-    for channel in summary.channels:
-        recorded = ('{:.1f}s'.format(channel.recorded_seconds)
-                    if channel.recorded_seconds is not None else '?')
-        active = ('{:.1f}s'.format(channel.active_seconds)
-                  if channel.active_seconds is not None else '?')
-        rate = '{:.2f} Hz'.format(channel.rate) if channel.rate is not None else 'unknown'
-        marker = '' if channel.basis == 'events' else '  ({})'.format(channel.basis)
-        lines.append('{:<34}{:>8}{:>10}{:>9}{:>11}{:>12}{}'.format(
-            channel.topic, channel.count, recorded, active, rate,
-            '{:.2f} Hz'.format(channel.averaged_rate), marker))
-
-    lines += ['',
-              'recorded is how long the channel was subscribed and not paused; active trims that',
-              'to when messages were really arriving, and rate is counted over active.',
-              'averaged is count over the whole bag -- what ros2 bag info and mcap info report.']
-
-    if summary.pause_windows:
-        lines.append('')
-        lines.append('paused:')
-        for begin, finish in summary.pause_windows:
-            lines.append('  {:.1f}s to {:.1f}s  ({:.2f}s)'.format(
-                begin - summary.start, finish - summary.start, finish - begin))
-
-    if summary.warnings:
-        lines.append('')
-        for warning in summary.warnings:
-            lines.append('warning: ' + warning)
-    return lines
-
-
-def summary_dict(summary):
-    """The report as plain data, with unknown values left as null."""
-    return {
-        'uri': summary.uri,
-        'duration_seconds': summary.duration,
-        'channels': [
-            {
-                'topic': channel.topic,
-                'type': channel.message_type,
-                'count': channel.count,
-                'recorded_seconds': channel.recorded_seconds,
-                'active_seconds': channel.active_seconds,
-                'rate': channel.rate,
-                'averaged_rate': channel.averaged_rate,
-                'basis': channel.basis,
-            }
-            for channel in summary.channels
-        ],
-        'pause_windows': [
-            {'start': begin - summary.start, 'end': finish - summary.start}
-            for begin, finish in summary.pause_windows
-        ],
-        'unexplained_gaps': [
-            {'start': begin - summary.start, 'end': finish - summary.start}
-            for begin, finish in summary.unexplained_gaps
-        ],
-        'stopped_for_low_disk': summary.low_disk_stop is not None,
-        'stopped_for_max_bag_size': summary.bag_size_limit_stop is not None,
-        'warnings': list(summary.warnings),
-    }
+    return warnings

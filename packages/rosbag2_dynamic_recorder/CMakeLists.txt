@@ -96,6 +96,9 @@ message(STATUS "rosbag2 features:${_feature_report}")
 
 add_library(${PROJECT_NAME} SHARED
   src/dynamic_recorder.cpp
+  src/recorder_services.cpp
+  src/recorder_events.cpp
+  src/topic_selection.cpp
   src/recorder_config.cpp
   src/storage_guard.cpp
   src/loss_accounting.cpp
@@ -153,7 +156,7 @@ install(
 if(BUILD_TESTING)
   # Unit tests for the parts that stand on their own; the node itself is covered end to end below.
   find_package(ament_cmake_gtest REQUIRED)
-  foreach(unit recorder_config storage_guard loss_accounting scheduler timings bag)
+  foreach(unit recorder_config storage_guard loss_accounting scheduler timings bag topic_selection)
     ament_add_gtest(test_${unit} test/test_${unit}.cpp)
     target_link_libraries(test_${unit} ${PROJECT_NAME})
   endforeach()
@@ -161,7 +164,7 @@ if(BUILD_TESTING)
   # Integration tests: they start a real recorder process and drive its services, because the
   # contract worth protecting is the service behaviour, not the internals.
   find_package(ament_cmake_pytest REQUIRED)
-  ament_add_pytest_test(test_recorder_services test/test_recorder_services.py
+  ament_add_pytest_test(test_recorder_services test
     TIMEOUT 600
     ENV RCUTILS_LOGGING_BUFFERED_STREAM=1
   )

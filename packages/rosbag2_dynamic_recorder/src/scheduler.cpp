@@ -21,6 +21,29 @@
 namespace rosbag2_dynamic_recorder
 {
 
+namespace
+{
+bool fires_on_messages(const std::optional<Scheduler::Scheduled> & scheduled)
+{
+  return scheduled && scheduled->mode != Scheduler::Mode::NodeTime;
+}
+
+bool is_due(
+  const std::optional<Scheduler::Scheduled> & scheduled, const std::string & topic,
+  rcutils_time_point_value_t send_ns, rcutils_time_point_value_t recv_ns)
+{
+  if (!fires_on_messages(scheduled)) {
+    return false;
+  }
+  if (!scheduled->tracking_topic.empty() && scheduled->tracking_topic != topic) {
+    return false;
+  }
+  const auto stamp = scheduled->mode == Scheduler::Mode::PublishTime ? send_ns : recv_ns;
+  // A zero stamp is one the middleware did not supply, not a time before the schedule.
+  return stamp != 0 && stamp >= scheduled->at_ns;
+}
+}  // namespace
+
 std::optional<Scheduler::Mode> Scheduler::mode_from(int32_t value)
 {
   switch (value) {
@@ -36,53 +59,38 @@ Scheduler::Scheduler(rclcpp::Node & node, rclcpp::CallbackGroup::SharedPtr group
 {
 }
 
-rclcpp::TimerBase::SharedPtr & Scheduler::slot(Kind kind)
+void Scheduler::update_message_time_pending()
 {
-  switch (kind) {
-    case Kind::Resume: return resume_timer_;
-    case Kind::Split: return split_timer_;
-    default: return record_timer_;
-  }
+  message_time_pending_.store(
+    fires_on_messages(slot(Kind::Resume).scheduled) ||
+    fires_on_messages(slot(Kind::Split).scheduled),
+    std::memory_order_relaxed);
 }
 
-Scheduler::Pending & Scheduler::pending_for(Kind kind)
+void Scheduler::replace(Kind kind, Scheduled scheduled)
 {
-  switch (kind) {
-    case Kind::Resume: return resume_;
-    case Kind::Split: return split_;
-    default: return record_;
+  if (slot(kind).timer) {
+    slot(kind).timer->cancel();
   }
+  std::lock_guard<std::mutex> lock(mutex_);
+  slot(kind).scheduled = std::move(scheduled);
+  update_message_time_pending();
 }
 
-void Scheduler::update_fast_path_locked()
+void Scheduler::schedule_at_node_time(
+  Kind kind, std::chrono::nanoseconds delay, std::function<void()> action)
 {
-  const auto by_message = [](const Pending & p) {return p.active && p.mode != Mode::NodeTime;};
-  pending_.store(by_message(resume_) || by_message(split_), std::memory_order_relaxed);
-}
-
-void Scheduler::arm(Kind kind, std::chrono::nanoseconds delta, std::function<void()> action)
-{
-  auto & timer = slot(kind);
-  if (timer) {
-    timer->cancel();
-  }
-  {
-    std::lock_guard<std::mutex> lock(mutex_);
-    // Replaces a message-time schedule of this kind too: only the newest is live.
-    pending_for(kind) = {true, node_.now().nanoseconds() + delta.count(), Mode::NodeTime, ""};
-    update_fast_path_locked();
-  }
-  // The node clock rather than a wall timer, so under use_sim_time a schedule keeps to the
-  // simulation's time even when it runs slow or pauses.
+  replace(kind, {kind, node_.now().nanoseconds() + delay.count(), Mode::NodeTime, ""});
+  auto & timer = slot(kind).timer;
   timer = node_.create_timer(
-    delta,
+    delay,
     [this, kind, &timer, action = std::move(action)]() {
       timer->cancel();  // One shot.
       {
-        // Off the list before the action runs, so a status the action publishes no longer shows
-        // it. A newer schedule would have cancelled this timer first, so the slot is still ours.
+        // Off the list before the action runs, so a status it publishes no longer shows it. A
+        // newer schedule would have cancelled this timer, so the slot is still this one's.
         std::lock_guard<std::mutex> lock(mutex_);
-        pending_for(kind).active = false;
+        slot(kind).scheduled.reset();
       }
       action();
     },
@@ -92,77 +100,55 @@ void Scheduler::arm(Kind kind, std::chrono::nanoseconds delta, std::function<voi
 void Scheduler::schedule_at_message_time(
   Kind kind, rcutils_time_point_value_t at_ns, Mode mode, const std::string & tracking_topic)
 {
-  // Retire a node-time timer of this kind: the newest schedule replaces it.
-  if (auto & timer = slot(kind)) {
-    timer->cancel();
-  }
-  std::lock_guard<std::mutex> lock(mutex_);
-  pending_for(kind) = {true, at_ns, mode, tracking_topic};
-  update_fast_path_locked();
+  replace(kind, {kind, at_ns, mode, tracking_topic});
 }
 
 std::vector<Scheduler::Scheduled> Scheduler::pending() const
 {
   std::lock_guard<std::mutex> lock(mutex_);
   std::vector<Scheduled> out;
-  const auto add = [&out](Kind kind, const Pending & p) {
-      if (p.active) {
-        out.push_back({kind, p.at_ns, p.mode, p.tracking_topic});
-      }
-    };
-  add(Kind::Resume, resume_);
-  add(Kind::Split, split_);
-  add(Kind::Record, record_);
+  for (const auto & s : slots_) {
+    if (s.scheduled) {
+      out.push_back(*s.scheduled);
+    }
+  }
   return out;
 }
 
-bool Scheduler::Pending::satisfied_by(
-  const std::string & topic, rcutils_time_point_value_t send_ns,
-  rcutils_time_point_value_t recv_ns) const
-{
-  if (!active || mode == Mode::NodeTime) {
-    return false;
-  }
-  if (!tracking_topic.empty() && tracking_topic != topic) {
-    return false;
-  }
-  const auto stamp = mode == Mode::PublishTime ? send_ns : recv_ns;
-  // A zero stamp means the middleware did not supply one; comparing against it would fire
-  // immediately and for the wrong reason.
-  return stamp != 0 && stamp >= at_ns;
-}
-
-Scheduler::Fired Scheduler::fired(
+Scheduler::Due Scheduler::take_due(
   const std::string & topic, rcutils_time_point_value_t send_ns,
   rcutils_time_point_value_t recv_ns)
 {
-  if (!pending_.load(std::memory_order_relaxed)) {
+  if (!message_time_pending_.load(std::memory_order_relaxed)) {
     return {};
   }
   std::lock_guard<std::mutex> lock(mutex_);
-  Fired fired;
-  fired.resume = resume_.satisfied_by(topic, send_ns, recv_ns);
-  fired.split = split_.satisfied_by(topic, send_ns, recv_ns);
-  resume_.active = resume_.active && !fired.resume;
-  split_.active = split_.active && !fired.split;
-  // Keep the fast path honest: only a schedule still active warrants taking the lock again.
-  update_fast_path_locked();
-  return fired;
+  const auto take = [&](Kind kind) {
+      auto & scheduled = slot(kind).scheduled;
+      const bool due = is_due(scheduled, topic, send_ns, recv_ns);
+      if (due) {
+        scheduled.reset();
+      }
+      return due;
+    };
+  Due due;
+  due.resume = take(Kind::Resume);
+  due.split = take(Kind::Split);
+  update_message_time_pending();
+  return due;
 }
 
 void Scheduler::clear()
 {
-  {
-    std::lock_guard<std::mutex> lock(mutex_);
-    resume_ = {};
-    split_ = {};
-    update_fast_path_locked();
-  }
-  for (auto * timer : {&resume_timer_, &split_timer_}) {
-    if (*timer) {
-      (*timer)->cancel();
+  for (const auto kind : {Kind::Resume, Kind::Split}) {
+    if (slot(kind).timer) {
+      slot(kind).timer->cancel();
     }
   }
+  std::lock_guard<std::mutex> lock(mutex_);
+  slot(Kind::Resume).scheduled.reset();
+  slot(Kind::Split).scheduled.reset();
+  update_message_time_pending();
 }
 
 }  // namespace rosbag2_dynamic_recorder

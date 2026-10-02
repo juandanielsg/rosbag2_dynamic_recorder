@@ -12,9 +12,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import time
-
-from rosbag2_dynamic_recorder_cli.format import format_duration
+from rosbag2_dynamic_recorder_cli.api import add_schedule_arguments
+from rosbag2_dynamic_recorder_cli.format import format_scheduled
 from rosbag2_dynamic_recorder_cli.verb import RecorderVerb
 
 
@@ -27,16 +26,8 @@ class RecordVerb(RecorderVerb):
             '--uri', default='', metavar='PATH',
             help='Where to create the new bag directory. Default: the uri the recorder was '
                  'started with')
-        parser.add_argument(
-            '--at', metavar='TIME', default=None,
-            help='Start recording at a future time instead of now. Accepts +30s, 14:05, '
-                 '2026-09-03T14:05, or epoch seconds. Compared against the node clock -- Record '
-                 'takes no mode field, so it is node time by definition and fires on a timer '
-                 'whether or not any messages are arriving')
+        add_schedule_arguments(parser, 'start', modes=False)
 
     def run(self, recorder, args):
         at = recorder.record(uri=args.uri, at=args.at)
-        if at is None:
-            print('recording')
-        else:
-            print('recording scheduled in {}'.format(format_duration(at - time.time())))
+        print(format_scheduled('recording', 'recording', at))

@@ -25,10 +25,15 @@ How a time is read off the command line is no longer this package's rule: the CL
 
 from types import SimpleNamespace
 
+import time
+
+from dynrec.bag import BagSummary, ChannelStats
 from dynrec.results import Status
 from rosbag2_dynamic_recorder_cli.format import (
+    format_bag_summary,
     format_bytes,
     format_duration,
+    format_scheduled,
     format_status,
     format_topic_group,
     state_word,
@@ -197,3 +202,29 @@ def test_pending_schedules_say_which_clock_they_wait_on():
 
     sim = format_status(_status(use_sim_time=True, schedules=[timer]))
     assert any('simulation clock' in line for line in sim), 'a sim time is not a date'
+
+
+def test_a_scheduled_call_says_when_and_an_immediate_one_says_what_happened():
+    assert format_scheduled('split', 'split', None, 'node') == 'split'
+    text = format_scheduled('split', 'split', time.time() + 90.5, 'publish')
+    assert text.startswith('split scheduled in 1m 3') and text.endswith('(publish time)')
+    assert '(' not in format_scheduled('recording', 'recording', time.time() + 5)
+
+
+def test_the_bag_report_shows_both_rates_and_marks_what_it_could_not_measure():
+    def channel(topic, rate, basis):
+        return ChannelStats(
+            topic=topic, message_type='t', count=20, first=0.0, last=1.0,
+            recorded_seconds=None if rate is None else 1.0, active_seconds=None,
+            rate=rate, averaged_rate=5.0, basis=basis, bag_seconds=4.0)
+    summary = BagSummary(
+        uri='/bag', start=0.0, end=4.0,
+        channels=[channel('/a', 20.0, 'events'), channel('/b', None, 'unknown')],
+        pause_windows=[(1.0, 2.0)], warnings=['careful'])
+    text = '\n'.join(format_bag_summary(summary))
+    assert '20.00 Hz' in text and '5.00 Hz' in text
+    assert 'unknown' in text and '(unknown)' in text
+    assert '1.0s to 2.0s' in text
+    assert 'warning: careful' in text
+    assert format_bag_summary(BagSummary(uri='/e', start=0, end=0, warnings=['w'])) == [
+        '/e: nothing to report', 'w']

@@ -38,22 +38,22 @@
 namespace rosbag2_dynamic_recorder
 {
 
+/// Where a new bag can be opened for `uri`: `uri` itself if nothing is there, else the first free
+/// `uri(N)`, as upstream's recorder picks. Nothing when every suffix up to a large bound is taken.
+std::optional<std::string> unused_bag_path(const std::string & uri);
+
 /// The bag being written: rosbag2's writer, the channels it has, and the counters describing it.
 ///
-/// Every operation takes the one lock inside, so the recorder never holds a writer lock itself
-/// and the invariant "the writer is only touched while open" lives here rather than in comments
-/// across the node. Write failures are counted and logged at a rate that cannot itself become
-/// the problem: a full disk used to take the whole node down, and the remaining topics and any
-/// later recovery are worth more than a clean death.
+/// Every operation takes the one lock inside, so the writer is only ever touched while open.
+/// A write failure is counted and logged, throttled, rather than thrown: the other topics, and
+/// any later recovery, are worth more than ending the process over a full disk.
 ///
 /// A recorded message never waits for a slow operation. Creating a channel, writing an event,
 /// splitting, snapshotting and closing all reach storage, and rosbag2 serialises storage behind
-/// one mutex that its cache thread holds while it writes to disk: when the disk stalls, such an
-/// operation waits for as long as the stall, holding the writer. A message arriving meanwhile is
-/// staged instead, and written ahead of the next one as soon as the writer is free. Without
-/// this, the benchmark lost messages on every topic during stalls rosbag2's cache would
-/// otherwise have absorbed (30 imu messages to a 2.8 s stall with a topic being added), since
-/// every subscription callback blocked and their queues overflowed.
+/// the mutex its cache thread holds while writing to disk, so during a disk stall such an
+/// operation holds the writer for as long as the stall lasts. A message arriving meanwhile is
+/// staged instead, and written ahead of the next one once the writer is free; otherwise every
+/// subscription callback would block and their queues overflow.
 class Bag
 {
 public:
@@ -161,7 +161,9 @@ private:
     Bag & bag_;
   };
 
-  /// Write one message; mutex_ held.
+  /// Create a channel the bag does not have yet; mutex_ held. Returns why it could not, or empty.
+  std::string create_channel_locked(const rosbag2_storage::TopicMetadata & metadata);
+  /// Write one message, counting it or the failure; mutex_ held.
   void write_locked(
     std::shared_ptr<const rclcpp::SerializedMessage> message, const std::string & topic,
     const std::string & type, rcutils_time_point_value_t recv_ns,

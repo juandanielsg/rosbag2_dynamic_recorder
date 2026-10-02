@@ -25,6 +25,7 @@ import sys
 
 from dynrec.errors import AmbiguousRecorder, CallFailed, DynrecError
 from dynrec.results import TopicChange
+from dynrec.schedule import TIME_MODES
 
 from rosbag2_dynamic_recorder_cli.format import format_topic_group
 
@@ -80,6 +81,27 @@ def add_pattern_arguments(parser, candidates):
         '--exclude-regex', default='', metavar='PATTERN',
         help='Drop topics matching this from the selection. Applied after names and --regex are '
              'combined, so it filters explicitly named topics too')
+
+
+def add_schedule_arguments(parser, noun, modes=True):
+    """--at, and with `modes` the --mode/--topic pair, for a verb that can be scheduled."""
+    parser.add_argument(
+        '--at', metavar='TIME', default=None,
+        help='Schedule the {} for a future time instead of now. Accepts +30s, 14:05, '
+             '2026-09-03T14:05, or epoch seconds{}'.format(
+                 noun, '' if modes else '. Compared against the node clock: it fires on a '
+                 'timer whether or not messages are arriving'))
+    if not modes:
+        return
+    parser.add_argument(
+        '--mode', choices=sorted(TIME_MODES), default='node',
+        help='Clock the scheduled time is compared against (default: %(default)s). '
+             'node fires on a timer and works on a robot that has gone quiet; publish and '
+             'receive are evaluated as messages arrive and cannot fire without traffic')
+    parser.add_argument(
+        '--topic', metavar='TOPIC', default='',
+        help='For publish and receive mode, evaluate against this topic only. It must be one '
+             'the recorder is subscribed to. Default: any recorded topic')
 
 
 def report_change(call, *groups, empty=None):

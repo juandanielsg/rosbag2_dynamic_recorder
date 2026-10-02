@@ -12,9 +12,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import time
-
-from rosbag2_dynamic_recorder_cli.format import add_schedule_arguments, format_duration
+from rosbag2_dynamic_recorder_cli.api import add_schedule_arguments
+from rosbag2_dynamic_recorder_cli.format import format_scheduled
 from rosbag2_dynamic_recorder_cli.verb import RecorderVerb
 
 
@@ -27,8 +26,4 @@ class ResumeVerb(RecorderVerb):
 
     def run(self, recorder, args):
         at = recorder.resume(at=args.at, mode=args.mode, topic=args.topic)
-        if at is None:
-            print('recording')
-        else:
-            print('resume scheduled in {} ({} time)'.format(
-                format_duration(at - time.time()), args.mode))
+        print(format_scheduled('recording', 'resume', at, args.mode))

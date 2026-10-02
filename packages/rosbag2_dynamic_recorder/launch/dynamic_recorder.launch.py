@@ -27,49 +27,53 @@ from launch.actions import DeclareLaunchArgument, OpaqueFunction
 from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
 
+
+def _bool(text):
+    return text == 'true'
+
+
+#: (name, default, type, description). Each typed argument becomes the recorder parameter of the
+#: same name; `topics` and `params_file` are handled apart.
 ARGUMENTS = [
-    ('uri', 'dynamic_bag', 'Output bag path.'),
-    ('storage_id', 'mcap', 'Storage plugin.'),
-    ('serialization_format', 'cdr', 'Message serialization format.'),
-    ('topics', '[]', 'Topics to record at startup, as a YAML list. May be empty.'),
-    ('start_paused', 'false', 'Start with recording paused.'),
-    ('use_sim_time', 'false', 'Stamp on the /clock-driven node clock; wait for /clock to start.'),
-    ('snapshot_mode', 'false', 'Buffer in memory and only write on ~/snapshot.'),
-    ('max_cache_size', str(100 * 1024 * 1024),  # the node's own default, 100 MiB
+    ('uri', 'dynamic_bag', str, 'Output bag path.'),
+    ('storage_id', 'mcap', str, 'Storage plugin.'),
+    ('serialization_format', 'cdr', str, 'Message serialization format.'),
+    ('topics', '[]', None, 'Topics to record at startup, as a YAML list. May be empty.'),
+    ('start_paused', 'false', _bool, 'Start with recording paused.'),
+    ('use_sim_time', 'false', _bool,
+     'Stamp on the /clock-driven node clock; wait for /clock to start.'),
+    ('snapshot_mode', 'false', _bool, 'Buffer in memory and only write on ~/snapshot.'),
+    ('max_cache_size', str(100 * 1024 * 1024), int,  # the node's own default, 100 MiB
      'Writer cache in bytes. snapshot_mode needs this or max_cache_duration to be > 0.'),
-    ('max_cache_duration', '0',
+    ('max_cache_duration', '0', int,
      'Writer cache bound in seconds; 0 for none. Combines with max_cache_size. A bound an '
      'operator can reason about: at most this much recording is at risk if the process dies.'),
-    ('max_bagfile_size', '0', 'Split the bag when a file reaches this many bytes; 0 never.'),
-    ('max_bagfile_duration', '0', 'Split the bag every this many seconds; 0 never.'),
-    ('storage_preset_profile', '',
+    ('max_bagfile_size', '0', int, 'Split the bag when a file reaches this many bytes; 0 never.'),
+    ('max_bagfile_duration', '0', int, 'Split the bag every this many seconds; 0 never.'),
+    ('storage_preset_profile', '', str,
      'Storage plugin preset. For mcap: none, fastwrite, zstd_fast, zstd_small. fastwrite is '
      'the one for a weak CPU; the zstd presets trade CPU for disk bandwidth.'),
-    ('storage_config_uri', '', 'Path to a storage-plugin YAML, overlaid on the preset.'),
-    ('record_subscription_events', 'true',
+    ('storage_config_uri', '', str, 'Path to a storage-plugin YAML, overlaid on the preset.'),
+    ('record_subscription_events', 'true', _bool,
      'Record SubscriptionChangeEvent into the bag, so sparse channels explain themselves.'),
-    ('min_free_space', '0',
+    ('min_free_space', '0', int,
      'Stop recording when free space on the bag filesystem falls below this many bytes; '
      '0 disables. Protects the disk, not the bag: logs or a second recorder can fill it.'),
-    ('min_free_space_percent', '0.0',
+    ('min_free_space_percent', '0.0', float,
      'Same, as a percentage of the filesystem; 0.0 disables. When both are set the stricter one '
      'applies.'),
-    ('max_bag_size', '0',
+    ('max_bag_size', '0', int,
      'Stop recording when the bag directory, across every split, grows past this many bytes; '
      '0 disables. A cap on the recording where max_bagfile_size only rolls to a new file.'),
-    ('messages_lost_report_period', '5.0',
+    ('messages_lost_report_period', '5.0', float,
      'Seconds between MessagesLostEvent publications. 0 disables reporting.'),
-    ('params_file', '', 'Optional YAML of extra parameters, e.g. recording profiles.'),
+    ('params_file', '', None, 'Optional YAML of extra parameters, e.g. recording profiles.'),
 ]
 
 
-def topic_list(context):
-    """Parse the `topics` argument into a real list.
-
-    ast.literal_eval rather than eval: this is a command-line string and there is no reason to
-    execute it.
-    """
-    raw = LaunchConfiguration('topics').perform(context).strip()
+def topic_list(raw):
+    """Parse the `topics` argument into a list. literal_eval, not eval: nothing here should run."""
+    raw = raw.strip()
     if not raw:
         return []
     try:
@@ -82,37 +86,16 @@ def topic_list(context):
 
 
 def recorder_parameters(context):
-    """Build the parameter dict, omitting `topics` when empty.
+    """The typed arguments as parameters, plus `topics` when it is not empty.
 
-    An empty list cannot survive the round trip through a launch parameters file -- it arrives at
-    rcl as "contains no value" and the node aborts. Since the node already defaults to recording
-    nothing, the fix is simply not to pass the key.
+    An empty list does not survive the launch parameters file -- rcl reads it as "no value" and
+    the node aborts -- and the node records nothing by default anyway.
     """
-    params = {
-        'uri': LaunchConfiguration('uri').perform(context),
-        'storage_id': LaunchConfiguration('storage_id').perform(context),
-        'serialization_format': LaunchConfiguration('serialization_format').perform(context),
-        'start_paused': LaunchConfiguration('start_paused').perform(context) == 'true',
-        'use_sim_time': LaunchConfiguration('use_sim_time').perform(context) == 'true',
-        'snapshot_mode': LaunchConfiguration('snapshot_mode').perform(context) == 'true',
-        'max_cache_size': int(LaunchConfiguration('max_cache_size').perform(context)),
-        'max_cache_duration': int(LaunchConfiguration('max_cache_duration').perform(context)),
-        'max_bagfile_size': int(LaunchConfiguration('max_bagfile_size').perform(context)),
-        'max_bagfile_duration':
-            int(LaunchConfiguration('max_bagfile_duration').perform(context)),
-        'storage_preset_profile':
-            LaunchConfiguration('storage_preset_profile').perform(context),
-        'storage_config_uri': LaunchConfiguration('storage_config_uri').perform(context),
-        'record_subscription_events':
-            LaunchConfiguration('record_subscription_events').perform(context) == 'true',
-        'min_free_space': int(LaunchConfiguration('min_free_space').perform(context)),
-        'min_free_space_percent':
-            float(LaunchConfiguration('min_free_space_percent').perform(context)),
-        'max_bag_size': int(LaunchConfiguration('max_bag_size').perform(context)),
-        'messages_lost_report_period':
-            float(LaunchConfiguration('messages_lost_report_period').perform(context)),
-    }
-    topics = topic_list(context)
+    def value(name):
+        return LaunchConfiguration(name).perform(context)
+
+    params = {name: parse(value(name)) for name, _, parse, _ in ARGUMENTS if parse is not None}
+    topics = topic_list(value('topics'))
     if topics:
         params['topics'] = topics
     return params
@@ -136,7 +119,7 @@ def _setup(context, *_args, **_kwargs):
 
 def generate_launch_description():
     return LaunchDescription(
-        [DeclareLaunchArgument(name, default_value=default, description=desc)
-         for name, default, desc in ARGUMENTS]
+        [DeclareLaunchArgument(name, default_value=default, description=description)
+         for name, default, _, description in ARGUMENTS]
         + [OpaqueFunction(function=_setup)]
     )

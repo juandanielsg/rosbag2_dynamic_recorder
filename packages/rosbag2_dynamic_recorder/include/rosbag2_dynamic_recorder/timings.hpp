@@ -25,14 +25,14 @@
 namespace rosbag2_dynamic_recorder
 {
 
-/// Opt-in timing of the recorder's own work, for the benchmark (parameter debug_timings).
+/// Opt-in timing of the recorder's own work (parameter debug_timings), published on
+/// ~/debug/timings.
 ///
 /// Built so that it cannot distort what it measures. Off, every hook is one predictable branch
 /// and nothing is read, stored or published. On, the cost stays off the per-message path: an
 /// operation is timed phase by phase (a clock read per phase, against phases of milliseconds),
-/// and a recorded message is only timed when it finds the write lock already held, where the
-/// ~50 ns of two clock reads is small next to the wait itself. Measured before this was written:
-/// ~50 ns per timed span against ~98 ns per enabled LTTng event, and 0 ns disabled.
+/// and a recorded message is only timed when it finds the write lock already held, where two
+/// clock reads are small next to the wait itself.
 class Timings
 {
 public:

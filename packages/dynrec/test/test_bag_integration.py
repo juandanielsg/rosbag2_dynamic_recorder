@@ -47,7 +47,7 @@ from rosgraph_msgs.msg import Clock
 from std_msgs.msg import String
 
 from dynrec import Recorder
-from dynrec.bag import describe, summary_dict
+from dynrec.bag import describe
 from dynrec.errors import CallFailed
 
 # A domain of its own, passed explicitly to every participant rather than exported into the
@@ -381,15 +381,8 @@ def test_channels_are_marked_sparse_when_they_were_not_live_throughout(summary):
     assert channel(summary, TOPICS[2]).sparse
 
 
-def test_the_report_shows_both_numbers_so_they_can_be_compared(summary):
-    from dynrec.bag import format_summary
-    text = '\n'.join(format_summary(summary))
-    assert 'averaged' in text
-    assert TOPICS[0] in text
-
-
 def test_the_json_shape_keeps_unknown_as_null(summary):
-    payload = summary_dict(summary)
+    payload = summary.as_dict()
     assert payload['channels']
     for entry in payload['channels']:
         assert entry['rate'] is None or entry['rate'] > 0
@@ -491,7 +484,7 @@ class TestLowDiskStop:
     def test_the_report_says_why_the_recording_ended(self, low_disk_bag):
         summary = describe(low_disk_bag)
         assert any('free space' in warning for warning in summary.warnings), summary.warnings
-        assert summary_dict(summary)['stopped_for_low_disk'] is True
+        assert summary.as_dict()['stopped_for_low_disk'] is True
 
 
 class TestBagSizeLimitStop:
@@ -541,8 +534,8 @@ class TestBagSizeLimitStop:
     def test_the_report_says_why_the_recording_ended(self, size_limited_bag):
         summary = describe(size_limited_bag)
         assert any('size limit' in warning for warning in summary.warnings), summary.warnings
-        assert summary_dict(summary)['stopped_for_max_bag_size'] is True
-        assert summary_dict(summary)['stopped_for_low_disk'] is False
+        assert summary.as_dict()['stopped_for_max_bag_size'] is True
+        assert summary.as_dict()['stopped_for_low_disk'] is False
 
 
 class TestSimTime:

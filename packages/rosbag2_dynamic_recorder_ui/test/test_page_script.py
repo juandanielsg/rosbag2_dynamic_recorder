@@ -14,15 +14,11 @@
 
 """The page's own JavaScript, parsed and run.
 
-Nothing in this project had ever executed it. A profile button's `title` was written with a
-literal newline inside a string literal, which is a parse error, so the whole script never ran and
-the browser UI showed nothing but its static placeholder text -- for two days, through a green
-test suite. The other tests here cover `build_state`, a plain function; `/api/state` answers
-whether or not the page parses; and the service tests never open the page at all. Every check
-passed and the thing the user looks at was dead.
+No other test executes it: `/api/state` answers whether or not the page parses, so a syntax error
+would leave the UI showing only its placeholder text behind a green test suite.
 
-So: extract the script, parse it, and run its render path against sample state through a DOM stub
-in [page_harness.js](page_harness.js). Not a browser. It answers three questions: does rendering
+So: parse web/app.js, and run its render path against sample state through a DOM stub in
+[page_harness.js](page_harness.js). Not a browser. It answers three questions: does rendering
 throw, which is the failure that leaves the page frozen; does text from the ROS graph reach the
 page escaped; and does a poll that brings nothing new leave the page's elements alone.
 
@@ -30,7 +26,6 @@ Needs node. The dev container image and CI install it; elsewhere these skip rath
 """
 
 import json
-import re
 import shutil
 import subprocess
 from pathlib import Path
@@ -39,6 +34,7 @@ import pytest
 
 HERE = Path(__file__).resolve().parent
 PAGE = HERE.parent / "web" / "index.html"
+SCRIPT = HERE.parent / "web" / "app.js"
 HARNESS = HERE / "page_harness.js"
 
 NODE = shutil.which("node") or shutil.which("nodejs")
@@ -116,26 +112,18 @@ SAMPLE_STATE = {
 }
 
 
-def page_script():
-    """The contents of the page's one <script> block."""
+def test_the_page_loads_its_script_and_stylesheet():
+    """The page refers to the files the UI node serves, and needs no node to check it."""
     html = PAGE.read_text(encoding="utf-8")
-    blocks = re.findall(r"<script>(.*?)</script>", html, re.S)
-    assert len(blocks) == 1, f"expected one script block, found {len(blocks)}"
-    return blocks[0]
-
-
-def test_the_page_has_exactly_one_script_block():
-    """Guards the extraction the two tests below depend on, and needs no node to do it."""
-    assert PAGE.is_file(), f"page not found at {PAGE}"
-    assert page_script().strip(), "the script block is empty"
+    assert '<script src="app.js"></script>' in html
+    assert '<link rel="stylesheet" href="style.css">' in html
+    assert SCRIPT.read_text(encoding="utf-8").strip(), "the script is empty"
 
 
 @needs_node
-def test_the_page_script_parses(tmp_path):
-    """The failure that went unnoticed for two days: the file does not parse, so nothing runs."""
-    script = tmp_path / "page.js"
-    script.write_text(page_script(), encoding="utf-8")
-    result = subprocess.run([NODE, "--check", str(script)],
+def test_the_page_script_parses():
+    """If the script does not parse, nothing on the page runs."""
+    result = subprocess.run([NODE, "--check", str(SCRIPT)],
                             capture_output=True, text=True, timeout=120)
     assert result.returncode == 0, "the page's JavaScript does not parse:\n" + result.stderr
 
@@ -145,12 +133,9 @@ def harness(tmp_path_factory):
     """One run of the harness over the page's script and SAMPLE_STATE, shared by the tests below."""
     if NODE is None:
         pytest.skip("node is not installed; add nodejs to the image to run these")
-    work = tmp_path_factory.mktemp("page")
-    script = work / "page.js"
-    script.write_text(page_script(), encoding="utf-8")
-    state = work / "state.json"
+    state = tmp_path_factory.mktemp("page") / "state.json"
     state.write_text(json.dumps(SAMPLE_STATE), encoding="utf-8")
-    return subprocess.run([NODE, str(HARNESS), str(script), str(state)],
+    return subprocess.run([NODE, str(HARNESS), str(SCRIPT), str(state)],
                           capture_output=True, text=True, timeout=120)
 
 

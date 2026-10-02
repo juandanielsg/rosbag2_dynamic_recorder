@@ -68,7 +68,7 @@ struct RecorderConfig
   double status_publish_period_s{1.0};
 
   /// Time the recorder's own operations and write-lock contention, and publish them on
-  /// ~/debug/timings. For the benchmark; off costs nothing.
+  /// ~/debug/timings. Off costs nothing.
   bool debug_timings{false};
 
   bool low_disk_check_enabled() const {return min_free_space > 0 || min_free_space_percent > 0.0;}
