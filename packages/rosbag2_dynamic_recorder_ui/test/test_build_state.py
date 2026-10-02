@@ -24,8 +24,11 @@ No ROS graph needed -- build_state is deliberately a plain function.
 
 from types import SimpleNamespace
 
+import pytest
+
+from dynrec.errors import InvalidRequest
 from dynrec.results import Status
-from rosbag2_dynamic_recorder_ui.ui_node import build_state
+from rosbag2_dynamic_recorder_ui.ui_node import build_state, resolve_at
 
 
 def _status(**overrides):
@@ -59,6 +62,8 @@ def _status(**overrides):
         stopped_for_max_bag_size=False,
         use_sim_time=False,
         waiting_for_clock=False,
+        schedules=[],
+        topic_losses=[],
     )
     base.update(overrides)
     # As the page receives it: through the library's own reading of the message, which is where
@@ -185,3 +190,51 @@ def test_the_page_fixture_matches_what_build_state_actually_returns():
         "the page fixture and build_state have diverged; "
         f"only in fixture: {sorted(fixture - real)}, only in build_state: {sorted(real - fixture)}"
     )
+
+
+def test_a_relative_time_is_counted_on_the_recorders_clock():
+    """"+30s" means thirty seconds on the clock the schedule fires on, not on this machine's.
+
+    The status says the bag opened at 1788500000.5 and has run 12.5 s, and it arrived 2 s ago, so
+    the recorder's clock reads 1788500015.0 now, whatever this machine's says.
+    """
+    resolved = resolve_at({"action": "resume", "at": "+30s"}, _status(), 2.0)
+    assert resolved["at"] == pytest.approx(1788500045.0)
+    assert resolved["action"] == "resume"
+
+
+def test_under_sim_time_a_relative_time_lands_on_the_simulation_clock():
+    sim = _status(recording_started=SimpleNamespace(sec=100, nanosec=0), elapsed_seconds=20.0,
+                  stamp=SimpleNamespace(sec=120, nanosec=0))
+    assert resolve_at({"at": "+10s"}, sim, 0.0)["at"] == pytest.approx(130.0)
+
+
+def test_a_stopped_recorders_clock_keeps_running_though_its_elapsed_time_stops():
+    """Its elapsed_seconds is the last bag's length once stopped, but a scheduled start still
+    has to count from now."""
+    stopped = _status(recording=False, elapsed_seconds=5.0,
+                      stamp=SimpleNamespace(sec=1788500100, nanosec=0))
+    assert resolve_at({"at": "+10s"}, stopped, 0.0)["at"] == pytest.approx(1788500110.0)
+
+
+def test_an_absolute_time_is_left_as_written():
+    assert resolve_at({"at": "1788600000"}, _status(), 2.0)["at"] == pytest.approx(1788600000.0)
+
+
+def test_no_time_means_now():
+    assert resolve_at({"at": ""}, _status(), 0.0)["at"] is None
+    assert resolve_at({}, _status(), 0.0)["at"] is None
+
+
+def test_without_a_status_the_time_is_left_for_the_library():
+    """No clock to count on yet; dynrec reads it against this machine's, as the CLI does."""
+    assert resolve_at({"at": "+30s"}, None, 0.0) == {"at": "+30s"}
+
+
+def test_an_unreadable_time_is_refused_with_the_reason():
+    with pytest.raises(InvalidRequest):
+        resolve_at({"at": "half past"}, _status(), 0.0)
+
+
+def test_the_page_gets_the_recorders_clock_for_its_countdowns():
+    assert _state(_status(), age=2.0)["recorder_now"] == pytest.approx(1788500015.0)

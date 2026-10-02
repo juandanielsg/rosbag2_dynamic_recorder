@@ -65,6 +65,8 @@ def _status(**overrides):
         stopped_for_max_bag_size=False,
         use_sim_time=False,
         waiting_for_clock=False,
+        schedules=[],
+        topic_losses=[],
     )
     base.update(overrides)
     base.setdefault('recording_started', SimpleNamespace(sec=1788500000, nanosec=0))
@@ -170,3 +172,28 @@ def test_format_bytes():
     assert format_bytes(512) == '512 B'
     assert format_bytes(1536) == '1.5 KiB'
     assert format_bytes(4 * 1024 * 1024) == '4.0 MiB'
+
+
+def test_per_topic_losses_are_listed_and_keep_missed_unknown():
+    loss = SimpleNamespace(topic_name='/scan', messages_missed=0,
+                           messages_lost_in_transport=3, messages_lost_in_recorder=0)
+    lines = format_status(_status(sequence_numbers_available=False, topic_losses=[loss]))
+    row = next(line for line in lines if line.startswith('by topic:'))
+    assert '/scan' in row and 'missed unknown' in row and 'lost 3 in transport' in row
+    assert not any(line.startswith('by topic:') for line in format_status(_status())), (
+        'nothing lost, no breakdown')
+
+
+def test_pending_schedules_say_which_clock_they_wait_on():
+    timer = SimpleNamespace(action=0, time=SimpleNamespace(sec=1788500100, nanosec=0), mode=0,
+                            tracking_topic='')
+    traffic = SimpleNamespace(action=1, time=SimpleNamespace(sec=1788500200, nanosec=0), mode=1,
+                              tracking_topic='/scan')
+    lines = format_status(_status(schedules=[timer, traffic]))
+    first = lines.index(next(line for line in lines if line.startswith('scheduled:')))
+    assert 'resume' in lines[first] and 'node time' in lines[first]
+    assert 'split' in lines[first + 1] and 'publish time' in lines[first + 1]
+    assert '/scan' in lines[first + 1] and 'waits for traffic' in lines[first + 1]
+
+    sim = format_status(_status(use_sim_time=True, schedules=[timer]))
+    assert any('simulation clock' in line for line in sim), 'a sim time is not a date'

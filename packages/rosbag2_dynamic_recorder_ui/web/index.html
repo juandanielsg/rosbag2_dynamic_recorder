@@ -19,6 +19,9 @@
     }
   }
   * { box-sizing: border-box; }
+  /* The page shows and hides with the hidden attribute, which a class setting display (as
+     .startbar does) would otherwise override. */
+  [hidden] { display: none !important; }
   body { margin: 0; background: var(--bg); color: var(--fg);
          font: 15px/1.5 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
   main { max-width: 900px; margin: 0 auto; padding: 20px 16px 64px; }
@@ -109,6 +112,22 @@
   .hint { color: var(--muted); font-size: 12.5px; margin-top: 10px; }
   .hint.bad { color: var(--bad); }
 
+  /* Text fields and selects share the filter's look. */
+  input.field, select.field { font: inherit; padding: 7px 11px; border-radius: 8px; min-width: 0;
+      border: 1px solid var(--line); background: var(--bg); color: var(--fg); }
+  .startbar { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 10px; }
+  .startbar input.field { flex: 1 1 260px; }
+  .schedbar { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+  .schedbar input.field { flex: 1 1 180px; }
+  ul.schedules { list-style: none; margin: 12px 0 0; padding: 0; font-size: 13px; }
+  ul.schedules li { padding: 6px 0; border-bottom: 1px solid var(--line); display: flex; gap: 10px; }
+  ul.schedules li:last-child { border-bottom: 0; }
+  .when { color: var(--muted); margin-left: auto; font-variant-numeric: tabular-nums; }
+  .tag.bad { color: var(--bad); }
+  .ev-split { color: var(--accent); }
+  .tl-split { position: absolute; top: 0; bottom: 0; width: 2px; margin-left: -1px;
+              background: var(--fg); opacity: .55; }
+
   #toast { position: fixed; left: 50%; transform: translateX(-50%); bottom: 20px;
            background: var(--card); border: 1px solid var(--line); border-radius: 8px;
            padding: 10px 16px; font-size: 14px; box-shadow: 0 4px 16px rgba(0,0,0,.18); }
@@ -139,6 +158,29 @@
       <button id="btn-snapshot">Save snapshot</button>
       <button id="btn-stop">Stop recording</button>
     </div>
+    <div class="startbar" id="startbar" hidden>
+      <input type="text" class="field" id="start-uri" autocomplete="off"
+             placeholder="Bag path for the new recording (empty: next to the last one)"
+             aria-label="Bag path for the new recording">
+    </div>
+  </div>
+
+  <div class="card" id="schedule-card" hidden>
+    <h2>Schedule</h2>
+    <div class="schedbar">
+      <select class="field" id="sched-action" aria-label="What to schedule"></select>
+      <input type="text" class="field" id="sched-at" autocomplete="off"
+             placeholder="+30s, 14:05 or 2026-10-01T14:05" aria-label="When">
+      <select class="field" id="sched-mode" aria-label="Which clock">
+        <option value="node">on a timer</option>
+        <option value="publish">by publish time</option>
+        <option value="receive">by receive time</option>
+      </select>
+      <select class="field" id="sched-topic" aria-label="Topic whose messages are checked"></select>
+      <button id="btn-schedule">Schedule</button>
+    </div>
+    <p class="hint" id="sched-hint"></p>
+    <ul class="schedules" id="schedules"></ul>
   </div>
 
   <div class="card" id="profiles-card" hidden>
@@ -154,6 +196,7 @@
       <span><i class="swatch" style="background:var(--accent);opacity:.85"></i> recorded</span>
       <span><i class="swatch" style="background:var(--track)"></i> not recorded</span>
       <span><i class="swatch" style="background:var(--band)"></i> paused, every topic at once</span>
+      <span><i class="swatch" style="width:2px;background:var(--fg);opacity:.55"></i> new file</span>
     </div>
     <p class="hint" id="tl-note"></p>
   </div>
@@ -167,7 +210,10 @@
         <button id="mode-text" aria-pressed="true">Text</button>
         <button id="mode-regex" aria-pressed="false">Regex</button>
       </div>
-      <button id="btn-match" disabled>Record all matching</button>
+      <input type="search" class="field" id="exclude" placeholder="Except (regex)…"
+             autocomplete="off" aria-label="Leave out topics matching" hidden>
+      <button id="btn-add-match" disabled hidden>Add matching</button>
+      <button id="btn-match" disabled hidden>Record only matching</button>
     </div>
     <ul class="topics" id="topics"><li class="empty">Waiting for topics…</li></ul>
     <div class="apply-row">
@@ -204,11 +250,24 @@ const UNOBSERVED_SLACK_S = 0.5;
 const TOAST_MS = 4000;
 const EVENT_FEED_LIMIT = 15;
 const POLL_INTERVAL_MS = 1000;
+// Where the timeline axis is labelled, as fractions of the recording so far.
+const TIMELINE_TICKS = [0, 0.25, 0.5, 0.75, 1];
 
 const $ = (id) => document.getElementById(id);
 const fmtInt = (n) => n.toLocaleString();
-const esc = (t) => t.replace(/[&<>"]/g,
-  (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+// Every string that reaches markup goes through this. Bag paths, event reasons and profile names
+// come from whoever last called the recorder, and ~/record takes any uri a ROS client sends.
+const esc = (t) => String(t ?? "").replace(/[&<>"']/g,
+  (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+
+// Replace an element's markup only when it changed. The page renders on every poll, and
+// rewriting identical markup threw away keyboard focus, a text selection and the tooltip under
+// the pointer once a second. Every markup write goes through here, so the cache stays true.
+function setHTML(el, html) {
+  if (el._html === html) return;
+  el._html = html;
+  el.innerHTML = html;
+}
 
 // mm:ss, so the axis ticks line up as a column of equal-width labels.
 function clock(seconds) {
@@ -294,12 +353,12 @@ function renderStats(s) {
   const missed = s.messages_missed === null
     ? '<div class="v unknown">unknown</div>'
     : `<div class="v">${fmtInt(s.messages_missed)}</div>`;
-  $("stats").innerHTML = `
+  setHTML($("stats"), `
     <div class="stat"><div class="k">Recorded</div><div class="v">${fmtInt(s.messages_written)}</div></div>
     <div class="stat"><div class="k">Missing</div>${missed}</div>
     <div class="stat"><div class="k">${s.recording ? "Running for" : "Recorded for"}</div><div class="v">${fmtDuration(s.elapsed_seconds)}</div></div>
     <div class="stat"><div class="k">Topics</div><div class="v">${s.subscribed_topics.length}</div></div>
-    <div class="stat"><div class="k">On disk</div><div class="v">${fmtBytes(s.bag_size_bytes)}</div></div>`;
+    <div class="stat"><div class="k">On disk</div><div class="v">${fmtBytes(s.bag_size_bytes)}</div></div>`);
 }
 
 function renderTopics(s) {
@@ -312,7 +371,7 @@ function renderTopics(s) {
   list.sort();
 
   if (!list.length) {
-    $("topics").innerHTML = '<li class="empty">No topics are being published yet.</li>';
+    setHTML($("topics"), '<li class="empty">No topics are being published yet.</li>');
     renderFilterHint(s, 0, 0, matcher());
     return;
   }
@@ -321,27 +380,40 @@ function renderTopics(s) {
   renderFilterHint(s, list.length, shown.length, m);
 
   if (!shown.length) {
-    $("topics").innerHTML =
-      '<li class="empty">Nothing matches that filter.</li>';
+    setHTML($("topics"), '<li class="empty">Nothing matches that filter.</li>');
     return;
   }
-  $("topics").innerHTML = shown.map((t) => {
+  const losses = new Map((s.topic_losses || []).map((l) => [l.topic, l]));
+  // The markup carries no checked state, so ticking a box does not change it and the next poll
+  // leaves the list, and the focus in it, alone. Boxes are set from state afterwards instead.
+  setHTML($("topics"), shown.map((t) => {
     const off = !s.available_topics.includes(t);
     return `<li><label>
-      <input type="checkbox" data-topic="${esc(t)}" ${checked.has(t) ? "checked" : ""}>
+      <input type="checkbox" data-topic="${esc(t)}">
       <span class="name">${highlighted(t, m.mark)}</span>
       ${off ? '<span class="tag">publisher gone</span>' : ""}
+      ${lossTag(losses.get(t))}
     </label></li>`;
-  }).join("");
-
-  for (const box of $("topics").querySelectorAll("input")) {
-    box.addEventListener("change", () => {
-      if (!pending) pending = new Set(recorded);
-      box.checked ? pending.add(box.dataset.topic) : pending.delete(box.dataset.topic);
-      renderPending(recorded);
-    });
+  }).join(""));
+  for (const box of $("topics").querySelectorAll("input[data-topic]")) {
+    box.checked = checked.has(box.dataset.topic);
   }
   renderPending(recorded);
+}
+
+// What one topic has lost in this bag, as a tag beside it, or nothing. Missed is left out of the
+// count, not counted as zero, where the middleware supplies no sequence numbers.
+function lossTag(loss) {
+  if (!loss) return "";
+  const missed = loss.missed === null ? 0 : loss.missed;
+  const total = missed + loss.lost_in_transport + loss.lost_in_recorder;
+  if (!total) return "";
+  const parts = [
+    loss.missed === null ? "missed: unknown" : `missed: ${fmtInt(loss.missed)}`,
+    `lost in transport: ${fmtInt(loss.lost_in_transport)}`,
+    `dropped by the recorder: ${fmtInt(loss.lost_in_recorder)}`,
+  ];
+  return `<span class="tag bad" title="${esc(parts.join("\n"))}">${fmtInt(total)} lost</span>`;
 }
 
 function renderPending(recorded) {
@@ -367,18 +439,11 @@ function renderProfiles(s) {
   $("profiles-card").hidden = list.length === 0;
   if (!list.length) return;
 
-  $("profiles").innerHTML = list.map((p) => {
+  setHTML($("profiles"), list.map((p) => {
     const on = p.name === s.active_profile;
-    return `<button class="${on ? "active" : ""}" data-profile="${p.name}"
-      title="${p.topics.join("\n")}" ${on || !s.recording ? "disabled" : ""}>${p.name}</button>`;
-  }).join("");
-
-  for (const btn of $("profiles").querySelectorAll("button[data-profile]")) {
-    btn.onclick = async () => {
-      const out = await act("set_profile", { name: btn.dataset.profile });
-      if (out.ok) { pending = null; toast(`Switched to ${btn.dataset.profile}.`); }
-    };
-  }
+    return `<button class="${on ? "active" : ""}" data-profile="${esc(p.name)}"
+      title="${esc(p.topics.join("\n"))}" ${on || !s.recording ? "disabled" : ""}>${esc(p.name)}</button>`;
+  }).join(""));
   $("profile-note").textContent = s.active_profile
     ? `Recording the "${s.active_profile}" profile.`
     : "The current selection does not match a profile.";
@@ -391,19 +456,22 @@ let filterMode = "text";
 
 function matcher() {
   const query = $("filter").value.trim();
-  if (!query) return { query, test: () => true, ok: true, mark: null };
+  const exclude = filterMode === "regex" ? $("exclude").value.trim() : "";
+  if (!query) return { query, exclude, test: () => true, ok: true, mark: null };
   if (filterMode === "text") {
     const q = query.toLowerCase();
-    return { query, test: (n) => n.toLowerCase().includes(q), ok: true, mark: q };
+    return { query, exclude, test: (n) => n.toLowerCase().includes(q), ok: true, mark: q };
   }
   try {
     const re = new RegExp(query);
-    return { query, test: (n) => re.test(n), ok: true, mark: re };
+    // Applied after the pattern, as the recorder applies exclude_regex to the combined set.
+    const ex = exclude ? new RegExp(exclude) : null;
+    return { query, exclude, test: (n) => re.test(n) && !(ex && ex.test(n)), ok: true, mark: re };
   } catch (err) {
     // Show everything rather than nothing: a half-typed expression should not look like a
     // pattern that legitimately matched no topics, which is the same distinction the recorder
     // makes when it refuses an invalid one.
-    return { query, test: () => true, ok: false, mark: null };
+    return { query, exclude, test: () => true, ok: false, mark: null };
   }
 }
 
@@ -423,14 +491,74 @@ function renderFilterHint(s, total, shown, m) {
   hint.classList.toggle("bad", !m.ok);
   const canMatch = filterMode === "regex" && m.query && m.ok && shown > 0 && s.recording;
   $("btn-match").disabled = !canMatch;
-  $("btn-match").textContent = canMatch
-    ? `Record all ${shown} matching` : "Record all matching";
+  $("btn-add-match").disabled = !canMatch;
+  $("btn-match").textContent = canMatch ? `Record only these ${shown}` : "Record only matching";
+  $("btn-add-match").textContent = canMatch ? `Add these ${shown}` : "Add matching";
 
   if (!m.ok) { hint.textContent = "Not a valid regular expression."; return; }
   if (!m.query) { hint.textContent = ""; return; }
+  const sent = m.exclude
+    ? `{regex: "${m.query}", exclude_regex: "${m.exclude}"}` : `{regex: "${m.query}"}`;
   hint.textContent = filterMode === "regex"
-    ? `Sent as set_topics {regex: "${m.query}"} — one call, nothing to enumerate.`
+    ? `Sent as one call, ${sent}, nothing to enumerate. Add keeps what is already recorded; ` +
+      "Record only drops everything else."
     : `Showing ${shown} of ${total}. Switch to Regex to send the pattern to the recorder.`;
+}
+
+// --- scheduling ----------------------------------------------------------------
+// What the recorder has queued comes from its status, so a schedule set from the CLI shows too.
+const SCHEDULE_LABELS = { resume: "Resume", split: "New file", record: "Start recording" };
+
+// A time on the recorder's clock as a person reads it. Under sim time that clock is the
+// simulation's, which is not a date.
+function clockText(s, at) {
+  return s.use_sim_time ? `t=${at.toFixed(1)} s` : new Date(at * 1000).toLocaleTimeString();
+}
+
+function renderSchedule(s) {
+  $("schedule-card").hidden = false;
+  // A recording recorder can roll over or resume later; a stopped one can only be started.
+  const actions = s.recording
+    ? [["split", "Start a new file"], ["resume", "Resume"]]
+    : [["record", "Start recording"]];
+  const actionSel = $("sched-action");
+  const keepAction = actionSel.value;
+  setHTML(actionSel, actions.map(([v, label]) => `<option value="${v}">${label}</option>`).join(""));
+  if (actions.some(([v]) => v === keepAction)) actionSel.value = keepAction;
+
+  const topicSel = $("sched-topic");
+  const keepTopic = topicSel.value;
+  setHTML(topicSel, ['<option value="">any recorded topic</option>'].concat(
+    s.subscribed_topics.map((t) => `<option value="${esc(t)}">${esc(t)}</option>`)).join(""));
+  if (s.subscribed_topics.includes(keepTopic)) topicSel.value = keepTopic;
+
+  // Record carries no clock choice: a scheduled start always fires on a timer.
+  const record = actionSel.value === "record";
+  if (record) $("sched-mode").value = "node";
+  $("sched-mode").disabled = record;
+  const byTimer = $("sched-mode").value === "node";
+  topicSel.disabled = record || byTimer;
+  $("btn-schedule").disabled = busy || s.waiting_for_clock;
+
+  $("sched-hint").textContent = record
+    ? "Opens a new bag at that time, on a timer, at the bag path above if one is given."
+    : byTimer
+      ? "Fires on a timer, even if no messages arrive. A relative time counts on the " +
+        `recorder's clock${s.use_sim_time ? ", which is the simulation's" : ""}.`
+      : "Fires on the first message stamped at or after that time, so it needs traffic: if " +
+        "the topic goes quiet, it waits.";
+
+  const list = s.schedules || [];
+  setHTML($("schedules"), list.length
+    ? list.map((p) => {
+      const when = p.mode === "node"
+        ? `at ${clockText(s, p.at)}, in ${fmtDuration(Math.max(0, p.at - s.recorder_now))}`
+        : `when a message on ${p.topic || "any topic"} has ${p.mode} time ${clockText(s, p.at)}`;
+      return `<li><span>${esc(SCHEDULE_LABELS[p.action] || p.action)}</span>` +
+             `<span class="when">${esc(when)}</span></li>`;
+    }).join("") +
+      '<li class="empty">Scheduling the same action again replaces it; there is no cancel.</li>'
+    : '<li class="empty">Nothing scheduled.</li>');
 }
 
 // --- timeline ----------------------------------------------------------------
@@ -483,48 +611,61 @@ function renderTimeline(s) {
   if (!rows.length) { card.hidden = true; return; }
 
   const at = (t) => ((t - t0) / span) * 100;
-  const tl = $("tl");
-  tl.textContent = "";
-  for (const topic of rows) {
-    const name = document.createElement("div");
-    name.className = "tl-name";
-    name.textContent = topic;
-    name.title = topic;
-    const track = document.createElement("div");
-    track.className = "tl-track";
-    if (seenFrom > t0 + UNOBSERVED_SLACK_S) {
-      const unseen = document.createElement("div");
-      unseen.className = "tl-unseen";
-      unseen.style.left = "0%";
-      unseen.style.width = at(seenFrom) + "%";
-      track.appendChild(unseen);
-    }
-    for (const [from, to] of spans.get(topic)) {
-      const seg = document.createElement("div");
-      seg.className = "tl-seg";
-      seg.style.left = at(from) + "%";
-      seg.style.width = (at(to) - at(from)) + "%";
-      track.appendChild(seg);
-    }
-    for (const [from, to] of pauses) {
-      const band = document.createElement("div");
-      band.className = "tl-band";
-      band.style.left = at(from) + "%";
-      band.style.width = (at(to) - at(from)) + "%";
-      band.title = "paused";
-      track.appendChild(band);
-    }
-    tl.append(name, track);
-  }
+  const place = (el, from, to) => {
+    el.style.left = at(from) + "%";
+    el.style.width = (at(to) - at(from)) + "%";
+  };
+  const unseen = seenFrom > t0 + UNOBSERVED_SLACK_S;
+  const div = (cls, parent) => {
+    const el = document.createElement("div");
+    el.className = cls;
+    parent.appendChild(el);
+    return el;
+  };
 
-  const axis = document.createElement("div");
-  axis.className = "tl-axis";
-  for (const f of [0, 0.25, 0.5, 0.75, 1]) {
-    const tick = document.createElement("span");
-    tick.textContent = clock(f * span);
-    axis.appendChild(tick);
+  // The right edge is now, so every bar moves on every poll. The elements are rebuilt only when
+  // the chart's shape changes -- a topic, a span or a pause appears or ends -- and otherwise kept
+  // and moved, so a tooltip under the pointer survives the poll.
+  // Rollovers to a new file, drawn as a line across every row: like a pause, a file boundary
+  // affects every topic at once.
+  const splits = history.filter((e) => e.kind === "split" && e.stamp >= t0 && e.stamp <= t1)
+    .map((e) => e.stamp);
+  const tl = $("tl");
+  const shape = JSON.stringify(
+    [rows.map((t) => [t, spans.get(t).length]), pauses.length, splits.length, unseen]);
+  if (tl._shape !== shape) {
+    tl._shape = shape;
+    tl.textContent = "";
+    tl._rows = rows.map((topic) => {
+      const name = div("tl-name", tl);
+      name.textContent = topic;
+      name.title = topic;
+      const track = div("tl-track", tl);
+      const row = {
+        unseen: unseen ? div("tl-unseen", track) : null,
+        segs: spans.get(topic).map(() => div("tl-seg", track)),
+        bands: pauses.map(() => div("tl-band", track)),
+        splits: splits.map(() => div("tl-split", track)),
+      };
+      for (const band of row.bands) band.title = "paused";
+      for (const mark of row.splits) mark.title = "new file";
+      return row;
+    });
+    const axis = div("tl-axis", tl);
+    tl._ticks = TIMELINE_TICKS.map(() => {
+      const tick = document.createElement("span");
+      axis.appendChild(tick);
+      return tick;
+    });
   }
-  tl.appendChild(axis);
+  rows.forEach((topic, i) => {
+    const row = tl._rows[i];
+    if (row.unseen) place(row.unseen, t0, seenFrom);
+    spans.get(topic).forEach(([from, to], k) => place(row.segs[k], from, to));
+    pauses.forEach(([from, to], k) => place(row.bands[k], from, to));
+    splits.forEach((stamp, k) => { row.splits[k].style.left = at(stamp) + "%"; });
+  });
+  TIMELINE_TICKS.forEach((f, k) => { tl._ticks[k].textContent = clock(f * span); });
 
   $("tl-note").textContent = seenFrom > t0 + UNOBSERVED_SLACK_S
     ? "Hatched: before this page connected. The recorder keeps only its ten most recent events " +
@@ -536,16 +677,27 @@ function renderTimeline(s) {
 function renderEvents(s) {
   // The newest few, newest first. history is sorted on the recorder's stamp, oldest first.
   const feed = (s.history || []).slice(-EVENT_FEED_LIMIT).reverse();
-  if (!feed.length) { $("events").innerHTML = '<li class="empty">Nothing yet.</li>'; return; }
-  $("events").innerHTML = feed.map((e) => {
+  if (!feed.length) { setHTML($("events"), '<li class="empty">Nothing yet.</li>'); return; }
+  setHTML($("events"), feed.map((e) => {
     // A pause has no topic because it stops every one of them. Saying "all topics" is the
     // honest label, and the distinction is the whole reason the two event kinds are separate.
     if (e.kind === "pause") {
       return `
     <li>
-      <span class="ev-${e.action}">${e.action}</span>
+      <span class="ev-${esc(e.action)}">${esc(e.action)}</span>
       <span class="name ev-all">all topics</span>
-      <span class="reason">${e.reason}</span>
+      <span class="reason">${esc(e.reason)}</span>
+    </li>`;
+    }
+    // A rollover: the file recording continues in, and what caused it. The full paths are in the
+    // tooltip; the name alone is what tells one file from the next.
+    if (e.kind === "split") {
+      const name = (e.opened_file || "").split(/[\\/]/).pop();
+      return `
+    <li title="${esc(`${e.closed_file} → ${e.opened_file}`)}">
+      <span class="ev-split">new file</span>
+      <span class="name ev-all">${esc(name)}</span>
+      <span class="reason">${esc(e.reason)}</span>
     </li>`;
     }
     // The recorder stopped itself: free space ran low, or the bag reached its size cap.
@@ -553,28 +705,28 @@ function renderEvents(s) {
       const why = e.kind === "low_disk" ? "low disk" : e.kind === "bag_size_limit" ? "bag size limit" : e.kind;
       return `
     <li>
-      <span class="ev-paused">${e.action}</span>
-      <span class="name ev-all">recording (${why})</span>
-      <span class="reason">${e.reason}</span>
+      <span class="ev-paused">${esc(e.action)}</span>
+      <span class="name ev-all">recording (${esc(why)})</span>
+      <span class="reason">${esc(e.reason)}</span>
     </li>`;
     }
     return `
     <li>
       <span class="${e.action === "subscribed" ? "ev-sub" : "ev-unsub"}">
         ${e.action === "subscribed" ? "added" : "removed"}</span>
-      <span class="name">${e.topic}</span>
-      <span class="reason">${e.reason}</span>
+      <span class="name">${esc(e.topic)}</span>
+      <span class="reason">${esc(e.reason)}</span>
     </li>`;
-  }).join("");
+  }).join(""));
 }
 
 function renderDetail(s) {
   const missed = s.messages_missed === null
     ? '<span class="v unknown">unknown</span><div class="caveat">The middleware does not supply publication sequence numbers here, so this cannot be measured. Not the same as zero.</div>'
     : `${fmtInt(s.messages_missed)}<div class="caveat">Counted from gaps in each publisher's sequence numbers. Independent of whether the transport reported anything.</div>`;
-  $("detail").innerHTML = `
-    <tr><td>Bag</td><td class="name">${s.uri || "—"}</td></tr>
-    <tr><td>Storage</td><td>${s.storage_id || "—"}</td></tr>
+  setHTML($("detail"), `
+    <tr><td>Bag</td><td class="name">${esc(s.uri || "—")}</td></tr>
+    <tr><td>Storage</td><td>${esc(s.storage_id || "—")}</td></tr>
     <tr><td>Messages recorded</td><td>${fmtInt(s.messages_written)}</td></tr>
     <tr><td>Messages missing</td><td>${missed}</td></tr>
     <tr><td>Failed writes</td><td>${fmtInt(s.write_errors)}
@@ -592,7 +744,7 @@ function renderDetail(s) {
       <div class="caveat">${s.min_free_space || s.min_free_space_percent
         ? `Recording stops below ${[s.min_free_space && fmtBytes(s.min_free_space), s.min_free_space_percent && `${s.min_free_space_percent}%`].filter(Boolean).join(" or ")}.`
         : "No minimum is configured, so a full disk fails writes rather than stopping the recording."}</div></td></tr>
-    <tr><td>Snapshot mode</td><td>${s.snapshot_mode ? "on" : "off"}</td></tr>`;
+    <tr><td>Snapshot mode</td><td>${s.snapshot_mode ? "on" : "off"}</td></tr>`);
 }
 
 function render(s) {
@@ -609,6 +761,7 @@ function render(s) {
   // leaving a row of dead controls and no way forward.
   $("btn-record").hidden = !s.connected || s.recording;
   $("btn-record").disabled = busy;
+  $("startbar").hidden = !s.connected || s.recording;
   for (const id of ["btn-pause", "btn-split", "btn-snapshot", "btn-stop"]) {
     $(id).hidden = s.connected && !s.recording;
   }
@@ -621,15 +774,17 @@ function render(s) {
     ? "Flush the buffer to disk" : "Only available when the recorder runs in snapshot mode";
 
   if (!s.connected) {
-    $("stats").innerHTML = "";
-    $("topics").innerHTML = '<li class="empty">Waiting for the recorder…</li>';
-    $("detail").innerHTML = "";
+    setHTML($("stats"), "");
+    setHTML($("topics"), '<li class="empty">Waiting for the recorder…</li>');
+    setHTML($("detail"), "");
     $("profiles-card").hidden = true;
+    $("schedule-card").hidden = true;
     return;
   }
   $("btn-apply").title = s.recording ? "" : "Start recording before changing topics";
   renderStats(s);
   renderProfiles(s);
+  renderSchedule(s);
   renderTopics(s);
   renderTimeline(s);
   renderEvents(s);
@@ -667,29 +822,72 @@ async function poll() {
 }
 
 $("filter").addEventListener("input", () => { if (state) renderTopics(state); });
+// One listener each for the checkboxes and the profile buttons, on their containers, so their
+// markup can be replaced without wiring each element again.
+$("topics").addEventListener("change", (ev) => {
+  const box = ev.target;
+  if (!state || !box.dataset || !box.dataset.topic) return;
+  const recorded = new Set(state.subscribed_topics);
+  if (!pending) pending = new Set(recorded);
+  box.checked ? pending.add(box.dataset.topic) : pending.delete(box.dataset.topic);
+  renderPending(recorded);
+});
+$("profiles").addEventListener("click", async (ev) => {
+  const btn = ev.target.closest && ev.target.closest("button[data-profile]");
+  if (!btn || btn.disabled) return;
+  const name = btn.dataset.profile;
+  const out = await act("set_profile", { name });
+  if (out.ok) { pending = null; toast(`Switched to ${name}.`); }
+});
+$("exclude").addEventListener("input", () => { if (state) renderTopics(state); });
 for (const [id, mode] of [["mode-text", "text"], ["mode-regex", "regex"]]) {
   $(id).onclick = () => {
     filterMode = mode;
     $("mode-text").setAttribute("aria-pressed", String(filterMode === "text"));
     $("mode-regex").setAttribute("aria-pressed", String(filterMode === "regex"));
+    // The exclusion and the two send buttons only mean something for a pattern.
+    for (const el of ["exclude", "btn-add-match", "btn-match"]) $(el).hidden = mode !== "regex";
     if (state) renderTopics(state);
   };
 }
-$("btn-match").onclick = async () => {
+// Both send the pattern and the exclusion as one call. set_topics makes the match the whole
+// selection; subscribe_topics adds it to what is already recorded. Topics recorded before and
+// after are never torn down either way.
+async function sendMatch(action, verb) {
   const m = matcher();
   if (!m.ok || !m.query) return;
-  // set_topics, not subscribe_topics: the button says "record all matching", and matching is
-  // the whole selection. Topics in both the old and new sets are never torn down.
-  const out = await act("set_topics", { topics: [], regex: m.query });
+  const out = await act(action, { topics: [], regex: m.query, exclude_regex: m.exclude });
   if (out.ok) {
     pending = null;
-    toast(`Recording ${(out.subscribed_topics || []).length} topics matching that pattern.`);
+    toast(`${verb} ${(out.subscribed_topics || []).length} topics.`);
   }
-};
+}
+$("btn-match").onclick = () => sendMatch("set_topics", "Now recording only these");
+$("btn-add-match").onclick = () => sendMatch("subscribe_topics", "Now recording");
 
 $("btn-record").onclick = async () => {
-  const out = await act("record");
-  if (out.ok) toast("Recording into a new bag.");
+  const out = await act("record", { uri: $("start-uri").value.trim() });
+  if (out.ok) { $("start-uri").value = ""; toast("Recording into a new bag."); }
+};
+for (const id of ["sched-action", "sched-mode"]) {
+  $(id).addEventListener("change", () => { if (state && state.connected) renderSchedule(state); });
+}
+$("btn-schedule").onclick = async () => {
+  const action = $("sched-action").value;
+  const at = $("sched-at").value.trim();
+  if (!at) { toast("Say when: +30s, 14:05, or a date and time."); return; }
+  const payload = action === "record"
+    ? { at, uri: $("start-uri").value.trim() }
+    : { at, mode: $("sched-mode").value,
+        topic: $("sched-topic").disabled ? "" : $("sched-topic").value };
+  const out = await act(action === "split" ? "split_bagfile" : action, payload);
+  if (!out.ok) return;
+  $("sched-at").value = "";
+  // The recorder runs a node-time schedule at once when its time has already passed.
+  const ran = typeof out.scheduled_at === "number" && $("sched-mode").value === "node" &&
+    state && out.scheduled_at <= state.recorder_now;
+  toast(ran ? "That time had already passed, so it ran now."
+            : `Scheduled for ${state ? clockText(state, out.scheduled_at) : out.scheduled_at}.`);
 };
 $("btn-pause").onclick = () => act(state && state.paused ? "resume" : "pause");
 $("btn-split").onclick = () => act("split_bagfile");

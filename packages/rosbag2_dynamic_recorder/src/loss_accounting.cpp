@@ -22,12 +22,17 @@ namespace rosbag2_dynamic_recorder
 {
 
 void LossAccounting::note_sequence(
-  SequenceMap & seen, const std::string & publisher, uint64_t sequence)
+  SequenceMap & seen, const std::string & publisher, uint64_t sequence, const std::string & topic)
 {
   sequence_numbers_available_.store(true, std::memory_order_relaxed);
   const auto previous = seen.find(publisher);
   if (previous != seen.end() && sequence > previous->second + 1) {
-    missed_.fetch_add(sequence - previous->second - 1, std::memory_order_relaxed);
+    const uint64_t gap = sequence - previous->second - 1;
+    missed_.fetch_add(gap, std::memory_order_relaxed);
+    std::lock_guard<std::mutex> lock(pending_mutex_);
+    auto & entry = per_topic_[topic];
+    entry.topic = topic;
+    entry.missed += gap;
   }
   seen[publisher] = sequence;
 }
@@ -37,6 +42,9 @@ void LossAccounting::note_transport_loss(const std::string & topic, uint64_t cou
   lost_in_transport_.fetch_add(count);
   std::lock_guard<std::mutex> lock(pending_mutex_);
   pending_[topic].in_transport += count;
+  auto & entry = per_topic_[topic];
+  entry.topic = topic;
+  entry.in_transport += count;
 }
 
 void LossAccounting::note_recorder_loss(const std::string & topic, uint64_t count)
@@ -44,6 +52,20 @@ void LossAccounting::note_recorder_loss(const std::string & topic, uint64_t coun
   lost_in_recorder_.fetch_add(count);
   std::lock_guard<std::mutex> lock(pending_mutex_);
   pending_[topic].in_recorder += count;
+  auto & entry = per_topic_[topic];
+  entry.topic = topic;
+  entry.in_recorder += count;
+}
+
+std::vector<LossAccounting::TopicLoss> LossAccounting::topic_totals() const
+{
+  std::lock_guard<std::mutex> lock(pending_mutex_);
+  std::vector<TopicLoss> out;
+  out.reserve(per_topic_.size());
+  for (const auto & [topic, loss] : per_topic_) {
+    out.push_back(loss);
+  }
+  return out;
 }
 
 std::vector<LossAccounting::TopicLoss> LossAccounting::drain()
@@ -75,6 +97,7 @@ void LossAccounting::reset()
   lost_in_recorder_.store(0);
   std::lock_guard<std::mutex> lock(pending_mutex_);
   pending_.clear();
+  per_topic_.clear();
 }
 
 }  // namespace rosbag2_dynamic_recorder

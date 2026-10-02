@@ -56,7 +56,8 @@ ros2 launch rosbag2_dynamic_recorder dynamic_recorder.launch.py \
 | `params_file` | *(empty)* | Optional YAML of extra parameters, e.g. profiles. |
 
 The other node parameters (`record_pause_events`, `record_low_disk_events`,
-`record_bag_size_limit_events`, `storage_check_period`, `status_publish_period`, `profile_names`
+`record_bag_size_limit_events`, `record_split_events`, `storage_check_period`,
+`status_publish_period`, `profile_names`
 and the profiles themselves)
 are not launch arguments. Set them through `params_file`, or with `-p name:=value` when running the
 node directly:

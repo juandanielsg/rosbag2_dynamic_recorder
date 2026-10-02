@@ -55,8 +55,10 @@ from rosbag2_py import ConverterOptions, SequentialReader, StorageOptions
 
 from rosbag2_dynamic_recorder_interfaces.msg import (
     BagSizeLimitEvent,
+    FileSplitEvent,
     LowDiskEvent,
     PauseEvent,
+    ScheduledAction,
     SubscriptionChangeEvent,
 )
 # The recorder offers Record, Resume, SplitBagfile and Stop under the stock rosbag2_interfaces
@@ -111,6 +113,8 @@ EVENT_TOPIC = f"{NODE}/events/subscription_change"
 PAUSE_TOPIC = f"{NODE}/events/pause"
 LOW_DISK_TOPIC = f"{NODE}/events/low_disk"
 BAG_SIZE_LIMIT_TOPIC = f"{NODE}/events/bag_size_limit"
+FILE_SPLIT_TOPIC = f"{NODE}/events/file_split"
+FILE_SPLIT_EVENT_TYPE = "rosbag2_dynamic_recorder_interfaces/msg/FileSplitEvent"
 
 
 class Harness(Node):
@@ -656,6 +660,87 @@ def test_scheduled_record_starts_later(recorder):
     assert harness.status().recording is True, "the scheduled recording did not start"
 
 
+def test_status_lists_pending_schedules_until_they_fire_or_a_stop_clears_them(recorder):
+    """A UI can only show what is queued if the recorder says so, whoever queued it."""
+    harness, _ = recorder
+    from builtin_interfaces.msg import Time
+
+    def at(nanoseconds):
+        return Time(sec=nanoseconds // 10**9, nanosec=nanoseconds % 10**9)
+
+    harness.call(SubscribeTopics, "subscribe_topics", topics=[TOPICS[0]])
+    harness.call(Pause, "pause")
+    assert list(harness.status().schedules) == [], "nothing queued yet"
+
+    now = harness.get_clock().now().nanoseconds
+    assert harness.call(Resume, "resume", resume_time=at(now + 3 * 10**9),
+                        resume_mode=0).return_code == 0
+    far = now + 3600 * 10**9
+    assert harness.call(SplitBagfile, "split_bagfile", split_time=at(far), split_mode=2,
+                        tracking_topic_name=TOPICS[0]).return_code == 0
+
+    resume, split = harness.status().schedules
+    assert (resume.action, resume.mode) == (ScheduledAction.RESUME, ScheduledAction.NODE_TIME)
+    assert abs(resume.time.sec - (now + 3 * 10**9) // 10**9) <= 1
+    assert (split.action, split.mode) == (ScheduledAction.SPLIT, ScheduledAction.RECEIVE_TIME)
+    assert split.tracking_topic == TOPICS[0]
+    assert split.time.sec == far // 10**9
+
+    harness.spin_for(5.0)
+    status = harness.status()
+    assert status.paused is False, "the scheduled resume did not fire"
+    assert [s.action for s in status.schedules] == [ScheduledAction.SPLIT], (
+        "a fired schedule must leave the list")
+
+    harness.call(Stop, "stop")
+    assert list(harness.status().schedules) == [], "a stop clears pending resumes and splits"
+
+    later = harness.get_clock().now().nanoseconds + 3600 * 10**9
+    assert harness.call(Record, "record", start_time=at(later)).return_code == 0
+    (record,) = harness.status().schedules
+    assert record.action == ScheduledAction.RECORD, "a scheduled record shows while stopped"
+
+
+def test_a_rollover_is_explained_by_a_stamped_event_in_the_new_file(recorder):
+    """WriteSplitEvent has no stamp and no cause; FileSplitEvent carries both, into the bag too.
+
+    Also pins the split count: rosbag2 reports closing the bag the way it reports a rollover, and
+    counting that put one file too many in the status of every stopped recorder.
+    """
+    harness, bag = recorder
+    from rclpy.qos import DurabilityPolicy
+
+    received = []
+    harness.create_subscription(
+        FileSplitEvent, FILE_SPLIT_TOPIC, received.append,
+        QoSProfile(depth=10, durability=DurabilityPolicy.TRANSIENT_LOCAL))
+    harness.call(SubscribeTopics, "subscribe_topics", topics=[TOPICS[0]])
+    harness.spin_for(1.0)
+
+    assert harness.call(SplitBagfile, "split_bagfile").return_code == 0
+    harness.spin_for(2.0)
+    harness.call(Stop, "stop")
+    harness.spin_for(0.5)
+
+    assert len(received) == 1, f"expected one FileSplitEvent, got {len(received)}"
+    event = received[0]
+    assert event.reason == "service:split_bagfile"
+    assert event.closed_file and event.opened_file and event.closed_file != event.opened_file
+    assert event.stamp.sec > 0, "the event must be placeable on the recording's timeline"
+    assert harness.status().bag_splits == 1, "closing the bag is not a rollover"
+
+    reader = SequentialReader()
+    reader.open(StorageOptions(uri=bag, storage_id="mcap"), ConverterOptions("cdr", "cdr"))
+    types = {t.name: t.type for t in reader.get_all_topics_and_types()}
+    recorded = []
+    while reader.has_next():
+        topic, data, _ = reader.read_next()
+        if types.get(topic) == FILE_SPLIT_EVENT_TYPE:
+            recorded.append(deserialize_message(data, FileSplitEvent))
+    assert [e.reason for e in recorded] == ["service:split_bagfile"], (
+        "the rollover must be explained inside the bag, not only on the topic")
+
+
 def test_invalid_schedule_is_rejected(recorder):
     """A mode we cannot honour, or a topic nobody records, would wait forever. Refuse instead."""
     harness, _ = recorder
@@ -1186,7 +1271,10 @@ def test_status_reports_no_write_errors_on_a_healthy_run(recorder):
     harness, _ = recorder
     harness.call(SubscribeTopics, "subscribe_topics", topics=[TOPICS[0]])
     harness.spin_for(2.0)
-    assert harness.status().write_errors == 0
+    status = harness.status()
+    assert status.write_errors == 0
+    # The per-topic breakdown lists only topics that lost something, so nothing here.
+    assert list(status.topic_losses) == []
 
 
 def read_bag_size_limit_events(uri):

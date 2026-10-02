@@ -101,6 +101,7 @@ add_library(${PROJECT_NAME} SHARED
   src/loss_accounting.cpp
   src/scheduler.cpp
   src/bag.cpp
+  src/timings.cpp
 )
 target_include_directories(${PROJECT_NAME} PUBLIC
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
@@ -152,7 +153,7 @@ install(
 if(BUILD_TESTING)
   # Unit tests for the parts that stand on their own; the node itself is covered end to end below.
   find_package(ament_cmake_gtest REQUIRED)
-  foreach(unit recorder_config storage_guard loss_accounting scheduler)
+  foreach(unit recorder_config storage_guard loss_accounting scheduler timings bag)
     ament_add_gtest(test_${unit} test/test_${unit}.cpp)
     target_link_libraries(test_${unit} ${PROJECT_NAME})
   endforeach()

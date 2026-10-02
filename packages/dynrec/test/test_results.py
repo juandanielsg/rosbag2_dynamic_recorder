@@ -61,6 +61,8 @@ def status_msg(**overrides):
         stopped_for_max_bag_size=False,
         use_sim_time=False,
         waiting_for_clock=False,
+        schedules=[],
+        topic_losses=[],
     )
     fields.update(overrides)
     return SimpleNamespace(**fields)
@@ -241,6 +243,40 @@ def test_both_event_streams_sort_together_on_the_recorder_stamp():
         action=0, stamp=stamp(3), reason='startup', node_name='/r',
         topic_name='/scan', topic_type='std_msgs/msg/String'))
     assert [e.stamp for e in sorted([pause, change], key=lambda e: e.stamp)] == [3.0, 5.0]
+
+
+def test_pending_schedules_come_out_as_words_on_the_recorder_clock():
+    """A UI shows these to someone deciding whether to wait, so the clock has to be named."""
+    status = Status.from_msg(status_msg(schedules=[
+        SimpleNamespace(action=0, time=stamp(1756900100, 500000000), mode=0, tracking_topic=''),
+        SimpleNamespace(action=1, time=stamp(1756900200), mode=2, tracking_topic='/scan'),
+    ]))
+    resume, split = status.schedules
+    assert (resume.action, resume.at, resume.mode, resume.topic) == (
+        'resume', 1756900100.5, 'node', '')
+    assert (split.action, split.mode, split.topic) == ('split', 'receive', '/scan')
+    assert status.as_dict()['schedules'][1]['topic'] == '/scan'
+
+
+def test_per_topic_missed_is_unknown_where_the_totals_are():
+    """The per-topic breakdown must not reintroduce the zero the total refuses to claim."""
+    loss = SimpleNamespace(topic_name='/scan', messages_missed=0,
+                           messages_lost_in_transport=2, messages_lost_in_recorder=1)
+    blind = Status.from_msg(status_msg(sequence_numbers_available=False, topic_losses=[loss]))
+    assert blind.topic_losses[0].missed is None
+    assert blind.topic_losses[0].lost_in_transport == 2
+    seeing = Status.from_msg(status_msg(topic_losses=[loss]))
+    assert seeing.topic_losses[0].missed == 0
+
+
+def test_split_events_say_which_file_ended_and_why():
+    event = Event.from_file_split_msg(SimpleNamespace(
+        stamp=stamp(9), reason='limit:max_bagfile_size', node_name='/r',
+        closed_file='/tmp/bag/bag_0.mcap', opened_file='/tmp/bag/bag_1.mcap'))
+    assert (event.kind, event.action, event.stamp) == ('split', 'split', 9.0)
+    assert event.reason == 'limit:max_bagfile_size'
+    assert event.opened_file.endswith('bag_1.mcap')
+    assert event.topic == '', 'a rollover affects every topic, like a pause'
 
 
 def test_the_status_carries_the_recorders_clock_apart_from_the_elapsed_time():

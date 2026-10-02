@@ -40,7 +40,7 @@ from dynrec.errors import (
     ServiceUnavailable,
 )
 from dynrec.bag import BagSummary, ChannelStats, describe
-from dynrec.results import Event, Profiles, Status, TopicChange
+from dynrec.results import Event, Profiles, Scheduled, Status, TopicChange, TopicLoss
 from dynrec.schedule import TIME_MODES
 
 __all__ = [
@@ -55,10 +55,12 @@ __all__ = [
     'Profiles',
     'Recorder',
     'RecorderNotFound',
+    'Scheduled',
     'ServiceUnavailable',
     'Status',
     'TIME_MODES',
     'TopicChange',
+    'TopicLoss',
     'describe',
     'discover',
 ]

@@ -107,7 +107,7 @@ scheduling; see [ROS 2 compatibility](#ros-2-compatibility).
 `resume`, `split_bagfile` and `record` accept a future timestamp. Node time (`mode: 0`) runs on a
 timer and fires even if the robot has gone quiet; it is the only mode `record` supports. Publish
 time (`1`) and receive time (`2`) compare against arriving messages, on any recorded topic or
-`tracking_topic_name` alone, so they cannot fire while none arrive. A mode outside 0–2, or an
+`tracking_topic_name` alone, so they cannot fire while none arrive. A mode outside 0-2, or an
 unrecorded `tracking_topic_name`, is rejected.
 
 `~/record` opens a fresh bag and restores the set active at stop. Since rosbag2 will not open over
@@ -187,7 +187,7 @@ then stopped is shown as 4.43 Hz. The recorded events recover the real rate.
 ## Disk space
 
 `max_bagfile_size` and `max_bagfile_duration` bound the bag, not the disk. Anything else growing on
-the same filesystem -- system logs, core dumps, a second recorder, a software update -- can still
+the same filesystem (system logs, core dumps, a second recorder, a software update) can still
 fill it, and a full disk on an embedded robot also stops logging and DDS shared memory. Set
 `min_free_space` (bytes) or `min_free_space_percent` (percentage of the filesystem); when free
 space falls below either, the recorder logs once, writes a `LowDiskEvent`, and stops. With both
@@ -228,7 +228,7 @@ with the same cap.
 `use_sim_time:=true` does what `ros2 bag record --use-sim-time` does: messages are stamped on the
 node clock driven by `/clock`, so the bag's timeline is the simulation's, and nothing is opened or
 subscribed until `/clock` has been heard, because a bag opened on a clock that reads zero would
-begin in 1970. The recorder answers in the meantime -- `~/status` says `waiting_for_clock`, and a
+begin in 1970. The recorder answers in the meantime: `~/status` says `waiting_for_clock`, and a
 call that needs an open bag is refused with a message that says why. Its own events were always on
 the node clock, so the two timelines in one bag agree; and node-time schedules follow the simulation
 when it runs slow or stops. Details in [docs/services.md](docs/services.md#simulation-time).

@@ -38,6 +38,7 @@ from ament_index_python.packages import get_package_share_directory
 from rclpy.node import Node
 
 from dynrec import DynrecError, Recorder, TopicChange
+from dynrec.schedule import NANOSECONDS_PER_SECOND, parse_time
 from rosbag2_dynamic_recorder_ui import DEFAULT_PORT, DEFAULT_RECORDER_NODE
 
 #: How many events to keep. The feed shows a handful; the timeline needs the rest, and the
@@ -65,20 +66,54 @@ def _selection(payload):
     )
 
 
+def _when(payload):
+    """The at/mode/topic of a resume or split: `at` absent means now."""
+    return dict(at=payload.get("at"), mode=payload.get("mode", "node"),
+                topic=payload.get("topic", ""))
+
+
 #: What the page may ask for, as calls on a :class:`dynrec.Recorder`. The page reads `ok` and
-#: `error` from every answer, and `subscribed_topics` from a topic change, for its toast.
+#: `error` from every answer, `subscribed_topics` from a topic change, and `scheduled_at` from a
+#: schedule, for its toast. `at` has been resolved against the recorder's clock by then.
 ACTIONS = {
     "set_topics": lambda rec, p: rec.set_topics(**_selection(p)),
     "subscribe_topics": lambda rec, p: rec.add(**_selection(p)),
     "unsubscribe_topics": lambda rec, p: rec.remove(**_selection(p)),
     "set_profile": lambda rec, p: rec.profile(p.get("name", "")),
     "pause": lambda rec, _p: rec.pause(),
-    "resume": lambda rec, _p: rec.resume(),
-    "split_bagfile": lambda rec, _p: rec.split(),
+    "resume": lambda rec, p: rec.resume(**_when(p)),
+    "split_bagfile": lambda rec, p: rec.split(**_when(p)),
     "snapshot": lambda rec, _p: rec.snapshot(),
     "stop": lambda rec, _p: rec.stop(),
-    "record": lambda rec, _p: rec.record(),
+    "record": lambda rec, p: rec.record(uri=p.get("uri", ""), at=p.get("at")),
 }
+
+
+def recorder_now(status, age):
+    """The recorder's clock now, from its last status and how long ago that arrived.
+
+    A status is stamped with the recorder's clock when it was built; under use_sim_time that is the
+    simulation's. Not recording_started + elapsed_seconds, which stops advancing at a stop.
+    """
+    return status.stamp + age
+
+
+def resolve_at(payload, status, age):
+    """`payload` with its `at` as epoch seconds on the recorder's clock, or None for "now".
+
+    The page sends what the person typed: "+30s", "14:05", an ISO time. dynrec would read the
+    relative and wall-clock forms against this machine's clock, but a node-time schedule fires on
+    the recorder's, which under use_sim_time is the simulation's and on another machine may simply
+    differ. So they are resolved here against the recorder's clock, as of its last status. Without
+    a status yet they are left for dynrec. Raises InvalidRequest for a time it cannot read.
+    """
+    at = payload.get("at")
+    if at is None or (isinstance(at, str) and not at.strip()):
+        return dict(payload, at=None)
+    if status is None:
+        return payload
+    seconds, nanoseconds = parse_time(at, now=recorder_now(status, age))
+    return dict(payload, at=seconds + nanoseconds / NANOSECONDS_PER_SECOND)
 
 
 def build_state(status, age, recorder, available_topics, history, profiles):
@@ -104,6 +139,9 @@ def build_state(status, age, recorder, available_topics, history, profiles):
     }
     if status is not None:
         state.update(status.as_dict(), stale=age is not None and age > STALE_AFTER_SECONDS)
+        # For countdowns to a schedule: the page must not reach for the browser's clock, which
+        # is neither the recorder's nor, under sim time, the simulation's.
+        state["recorder_now"] = recorder_now(status, age or 0.0)
     return state
 
 
@@ -207,13 +245,18 @@ class RecorderUi(Node):
         run = ACTIONS.get(action)
         if run is None:
             return {"ok": False, "error": f"unknown action '{action}'"}
+        with self._lock:
+            status = self._status
+            age = time.monotonic() - self._status_stamp if status else 0.0
         try:
-            result = run(self._client, payload)
+            result = run(self._client, resolve_at(payload, status, age))
         except DynrecError as exc:
             return {"ok": False, "error": str(exc)}
         out = {"ok": True}
         if isinstance(result, TopicChange):
             out["subscribed_topics"] = result.subscribed
+        elif isinstance(result, float):
+            out["scheduled_at"] = result
         return out
 
     def destroy_node(self):

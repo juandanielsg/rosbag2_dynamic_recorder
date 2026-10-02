@@ -86,6 +86,11 @@ uint64 messages_missed
 # means anything at all. If false, treat messages_missed as unknown rather than zero.
 bool sequence_numbers_available
 
+# The figures above broken down by topic, for every topic that has lost anything in this bag, sorted
+# by name. Empty when nothing has been lost. Answers which topic the totals came from, which is
+# usually the question that decides the remedy.
+TopicLoss[] topic_losses
+
 # Messages that reached the recorder but could not be written, e.g. because the disk filled.
 #
 # These are lost data the recorder knows about with certainty, distinct from messages_missed
@@ -138,3 +143,7 @@ bool use_sim_time
 # True under use_sim_time until the first /clock message arrives. No bag is open and every call
 # that needs one is refused until then, so a recorder that seems idle after launch is not stuck.
 bool waiting_for_clock
+
+# Resumes, splits and records scheduled for later and not yet fired, at most one of each, in that
+# order. Includes schedules set by any client, so a UI can show what another one queued.
+ScheduledAction[] schedules

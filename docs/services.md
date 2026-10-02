@@ -92,11 +92,18 @@ zero stamp means "now", so an untouched request is already the immediate request
   topic or on `tracking_topic_name` alone. They cannot fire while no messages are arriving, which
   is useful for "when data resumes" and a trap for "in five minutes".
 
-A mode outside 0–2, or a `tracking_topic_name` nobody is recording, is rejected: a schedule keyed
+A mode outside 0-2, or a `tracking_topic_name` nobody is recording, is rejected: a schedule keyed
 to a topic that is not being recorded would wait forever.
+
+Only the newest schedule of each operation is live, whichever clock either is on: a second
+`resume` replaces the first, a timer or a queued message-time check alike. There is no call to
+cancel one; scheduling the same operation again replaces it.
 
 `~/stop` clears a queued `resume` or `split_bagfile`, so it cannot fire against the next bag. A
 queued `record` is not cleared and will still fire.
+
+Whatever is queued, by any client, is listed in the status as `schedules`, until it fires or a stop
+clears it.
 
 ## Simulation time
 
@@ -110,8 +117,8 @@ some, because everything it writes has to agree with itself:
   the node clock, so the two timelines in one bag now match.
 - Nothing is opened or subscribed until `/clock` has been heard: a node clock reads zero until then,
   and a bag opened on it would begin in 1970. The recorder is up and answering in the meantime,
-  `~/status` says `waiting_for_clock`, and a call that needs an open bag -- adding a topic,
-  `~/record` -- is refused with a message that says why rather than left to time out.
+  `~/status` says `waiting_for_clock`, and a call that needs an open bag, such as adding a topic
+  or `~/record`, is refused with a message that says why rather than left to time out.
 - Node-time schedules (`resume`, `split_bagfile`, `record` with a future stamp) run on the node
   clock too, so they keep to simulated time when the simulation runs slow or stops.
 
@@ -130,7 +137,7 @@ A few fields need reading carefully:
   unknown, not zero, when that is false.
 
 `messages_lost_in_transport`
-: What the transport reported as dropped before delivery. Observed reading 0 while roughly 3–4% of
+: What the transport reported as dropped before delivery. Observed reading 0 while roughly 3-4% of
   messages were absent from a bag. Treat it as a floor, not a total. A large `messages_missed` with
   this at 0 means the recorder was blocked long enough for publisher history to overflow. When this
   is the figure that climbs, the remedy is on the publisher's side: its QoS, the network, or load.
@@ -145,6 +152,18 @@ A few fields need reading carefully:
 
 `messages_lost`
 : The two above summed, for anything that only wants a total. Inherits the transport caveat.
+
+`topic_losses`
+: The three figures above broken down by topic (`TopicLoss`), for every topic that has lost
+  anything in this bag, sorted by name, and empty when nothing has been lost. Counted over the bag
+  rather than the subscription: dropping a topic and adding it back keeps its figures, and
+  `~/record` starts them at zero. The per-topic `messages_missed` carries the same caveat as the
+  total.
+
+`schedules`
+: Resumes, splits and records queued for later and not yet fired (`ScheduledAction`), at most one
+  of each, in that order, with the time, the clock it is compared against and the tracking topic.
+  It lists schedules any client set, so a UI shows what a script queued.
 
 `bag_size_bytes`
 : Bytes flushed to disk, not bytes captured. The writer caches, so this reads 0 early in a perfectly
@@ -181,8 +200,8 @@ A few fields need reading carefully:
   a schedule or to turn `+30s` into a time, should use `stamp`.
 
 The remaining fields are literal: `recording`, `paused`, `snapshot_mode`, `subscribed_topics`,
-`bag_splits` (times the file has rolled over) and `messages_written` (which counts the recorder's
-own event messages too).
+`bag_splits` (times the file has rolled over; closing the bag at a stop is not counted) and
+`messages_written` (which counts the recorder's own event messages too).
 
 `active_profile` is derived from the live topic set on every publication, not remembered. Record one
 extra topic and it goes empty, because no profile is in effect any more. Land exactly on another
@@ -196,14 +215,15 @@ profile's set and it reports that one, whatever command got you there.
 | `~/events/pause` | `PauseEvent` | also written into the bag |
 | `~/events/low_disk` | `LowDiskEvent` | also written into the bag |
 | `~/events/bag_size_limit` | `BagSizeLimitEvent` | also written into the bag |
-| `~/events/write_split` | `WriteSplitEvent` | |
+| `~/events/file_split` | `FileSplitEvent` | also written into the bag |
+| `~/events/write_split` | `WriteSplitEvent` | stock; no stamp or cause |
 | `~/events/messages_lost` | `MessagesLostEvent` | stock on Rolling, a field-identical copy on Jazzy and Kilted |
 
-Writing the first three into the bag is what makes a gap legible: a gap mid-bag is otherwise
+Writing the first five into the bag is what makes a gap legible: a gap mid-bag is otherwise
 indistinguishable from a dropout, a crash or a network fault. The event records what changed, when and why, in-stream and
 timestamped, and it survives bag splitting.
 
-The three cover different shapes of gap, and you need all of them:
+The first four cover different shapes of gap, and you need all of them:
 
 - `SubscriptionChangeEvent` explains a channel that stops: one topic goes sparse while the others
   carry on. Disable with `record_subscription_events:=false`.
@@ -219,6 +239,13 @@ The three cover different shapes of gap, and you need all of them:
   the bag directory grows past it, across every split, the recorder emits this, stops, and closes
   the bag. `max_bagfile_size` only rolls to a new file; this is the cap on the recording as a whole.
   Disable the in-bag copy with `record_bag_size_limit_events:=false`.
+
+`FileSplitEvent` explains a file boundary rather than a gap: when the bag rolls over, by
+`~/split_bagfile`, a schedule, or `max_bagfile_size` / `max_bagfile_duration`, it names the file
+that closed, the file recording continues in, and the cause. The stock `WriteSplitEvent` is still
+published for clients written against it, but it carries neither a stamp nor a cause, so it cannot
+be placed on a timeline. The in-bag copy goes into the new file; disable it with
+`record_split_events:=false`. Closing the bag at a stop emits none.
 
 While paused no messages are written, but these events still are. An event suppressed by the pause
 it describes would leave the hole it exists to account for.
@@ -248,7 +275,8 @@ rosbag2_dynamic_recorder:
 ```
 
 A worked example using the TurtleBot 4 simulator's topics ships at
-`rosbag2_dynamic_recorder/config/profiles.example.yaml`.
+`rosbag2_dynamic_recorder/config/profiles.example.yaml`. [Recording profiles](profiles.md) covers
+declaring, switching and designing them in full.
 
 ## Parameters
 
@@ -271,6 +299,7 @@ A worked example using the TurtleBot 4 simulator's topics ships at
 | `record_pause_events` | `true` | Write pauses and resumes into the bag. |
 | `record_low_disk_events` | `true` | Write a low-disk stop into the bag. |
 | `record_bag_size_limit_events` | `true` | Write a bag-size-limit stop into the bag. |
+| `record_split_events` | `true` | Write each rollover to a new file into the bag. |
 | `min_free_space` | `0` | Stop recording below this many bytes free on the bag filesystem; `0` disables. |
 | `min_free_space_percent` | `0.0` | Same, as a percentage of the filesystem; `0.0` disables. The stricter applies. |
 | `max_bag_size` | `0` | Stop recording once the bag directory, across every split, exceeds this many bytes; `0` disables. |
@@ -287,13 +316,14 @@ cuts the per-message CPU cost; the `zstd_*` presets spend CPU to reduce disk ban
 slow card with a spare core is a net gain; and a size or duration split keeps any one file small
 enough to survive a crash. With `max_cache_size` and `max_cache_duration` both `0` every message is
 written synchronously from its callback, which is what makes publishers overwrite their own
-history unseen — the recorder warns once at startup if you do that.
+history unseen; the recorder warns once at startup if you do that.
 
 These are node parameters. The launch files forward only some of them: `uri`, `storage_id`,
 `serialization_format`, `topics`, `start_paused`, `use_sim_time`, `snapshot_mode`, the six storage settings,
 `record_subscription_events`, `messages_lost_report_period`, `min_free_space`,
 `min_free_space_percent` and `max_bag_size`. Set `record_pause_events`, `record_low_disk_events`,
-`record_bag_size_limit_events`, `storage_check_period`, `status_publish_period`, `profile_names`
+`record_bag_size_limit_events`, `record_split_events`, `storage_check_period`,
+`status_publish_period`, `profile_names`
 and the profiles themselves
 through `params_file` (or `-p name:=value` when running the node directly). The full argument list
 is in [Install](install.md#launch-arguments).

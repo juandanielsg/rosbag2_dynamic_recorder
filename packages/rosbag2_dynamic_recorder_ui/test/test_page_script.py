@@ -22,12 +22,11 @@ whether or not the page parses; and the service tests never open the page at all
 passed and the thing the user looks at was dead.
 
 So: extract the script, parse it, and run its render path against sample state through a DOM stub
-in [page_harness.js](page_harness.js). Not a browser -- it answers one question, does rendering
-throw, which is the failure that leaves the page frozen.
+in [page_harness.js](page_harness.js). Not a browser. It answers three questions: does rendering
+throw, which is the failure that leaves the page frozen; does text from the ROS graph reach the
+page escaped; and does a poll that brings nothing new leave the page's elements alone.
 
-Needs node, which the dev container does not carry. These skip rather than fail where it is
-absent, so they are only as useful as the machine running them: add `nodejs` to the image to make
-them run in CI.
+Needs node. The dev container image and CI install it; elsewhere these skip rather than fail.
 """
 
 import json
@@ -84,6 +83,15 @@ SAMPLE_STATE = {
     "stopped_for_max_bag_size": False,
     "use_sim_time": False,
     "waiting_for_clock": False,
+    "recorder_now": 1788500062.5,
+    "schedules": [
+        {"action": "resume", "at": 1788500090.0, "mode": "node", "topic": ""},
+        {"action": "split", "at": 1788500120.0, "mode": "publish", "topic": "/spike/a"},
+    ],
+    "topic_losses": [
+        # missed None on purpose, like messages_missed above: the tag must not count it as zero.
+        {"topic": "/spike/c", "missed": None, "lost_in_transport": 2, "lost_in_recorder": 1},
+    ],
     "profiles": [
         {"name": "light", "topics": ["/spike/a"]},
         {"name": "everything", "topics": ["/spike/a", "/spike/b", "/spike/c"]},
@@ -101,6 +109,9 @@ SAMPLE_STATE = {
          "reason": "service:pause", "stamp": 1788500041.0},
         {"kind": "pause", "topic": "", "action": "resumed",
          "reason": "service:resume", "stamp": 1788500055.0},
+        {"kind": "split", "topic": "", "action": "split", "reason": "service:split_bagfile",
+         "stamp": 1788500058.0, "closed_file": "/tmp/bag/bag_0.mcap",
+         "opened_file": "/tmp/bag/bag_1.mcap"},
     ],
 }
 
@@ -129,18 +140,46 @@ def test_the_page_script_parses(tmp_path):
     assert result.returncode == 0, "the page's JavaScript does not parse:\n" + result.stderr
 
 
-@needs_node
-def test_rendering_does_not_throw_on_any_branch(tmp_path):
-    """Parsing is not enough: a render that throws leaves the page on its placeholder too."""
-    script = tmp_path / "page.js"
+@pytest.fixture(scope="module")
+def harness(tmp_path_factory):
+    """One run of the harness over the page's script and SAMPLE_STATE, shared by the tests below."""
+    if NODE is None:
+        pytest.skip("node is not installed; add nodejs to the image to run these")
+    work = tmp_path_factory.mktemp("page")
+    script = work / "page.js"
     script.write_text(page_script(), encoding="utf-8")
-    state = tmp_path / "state.json"
+    state = work / "state.json"
     state.write_text(json.dumps(SAMPLE_STATE), encoding="utf-8")
+    return subprocess.run([NODE, str(HARNESS), str(script), str(state)],
+                          capture_output=True, text=True, timeout=120)
 
-    result = subprocess.run([NODE, str(HARNESS), str(script), str(state)],
-                            capture_output=True, text=True, timeout=120)
-    assert result.returncode == 0, (
-        "a render path threw:\n" + result.stdout + result.stderr)
+
+def passed(run, label):
+    """Whether the harness ran the check called `label` and it passed."""
+    return f"  ok    {label}" in run.stdout
+
+
+@needs_node
+def test_rendering_does_not_throw_on_any_branch(harness):
+    """Parsing is not enough: a render that throws leaves the page on its placeholder too."""
+    assert harness.returncode == 0, (
+        "a check in the harness failed:\n" + harness.stdout + harness.stderr)
     # Non-vacuous: the harness must actually have exercised the branches, not just loaded.
-    assert 'filter regex "["' in result.stdout, (
-        "the harness did not run the invalid-pattern branch:\n" + result.stdout)
+    assert passed(harness, 'filter regex "["'), (
+        "the harness did not run the invalid-pattern branch:\n" + harness.stdout)
+
+
+@needs_node
+def test_text_from_the_graph_is_escaped(harness):
+    """~/record takes any uri a ROS client sends. It, and every event and profile name, used to
+    reach innerHTML raw, so whoever could call the recorder could run script in the operator's
+    browser."""
+    assert passed(harness, "text from the graph is escaped"), harness.stdout + harness.stderr
+
+
+@needs_node
+def test_a_poll_with_nothing_new_rebuilds_nothing(harness):
+    """The page re-rendered its lists every second, which took keyboard focus off a checkbox
+    and closed any tooltip, within a second of either arriving."""
+    assert passed(harness, "an unchanged state rebuilds nothing"), harness.stdout + harness.stderr
+    assert passed(harness, "a ticked box survives the next poll"), harness.stdout + harness.stderr

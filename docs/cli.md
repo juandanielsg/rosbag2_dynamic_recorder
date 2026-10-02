@@ -93,6 +93,10 @@ its node clock. On one machine, or a clock-synced fleet, those agree; across a r
 drifted they do not, which is why the absolute forms exist.
 :::
 
+Only the newest schedule of each operation is live; scheduling it again replaces it, and there is
+no cancel. `status` lists whatever is queued, by any client, under `scheduled`, saying which clock
+each waits on.
+
 ## Reading a bag back
 
 ```bash
@@ -129,7 +133,13 @@ ros2 dynrec status --json
 
 Fields the recorder cannot vouch for come out as `null`, never as a zero. `messages_missed` is
 `null` when the middleware supplies no publication sequence numbers, the difference between
-"nothing was missed" and "no idea".
+"nothing was missed" and "no idea". The per-topic breakdown, `topic_losses`, follows the same rule,
+and the human-readable `status` lists it under `by topic` only when some topic has lost something.
+
+A recorder launched with `use_sim_time` reports `state: waiting for /clock` until the simulation
+publishes its first clock message, and `--json` carries `use_sim_time` and `waiting_for_clock` for a
+script. No bag is open yet, so the recorder is up and waiting rather than stopped or unreachable;
+see [Simulation time](services.md#simulation-time).
 
 ```bash
 ros2 dynrec topics | xargs -n1 echo recording:

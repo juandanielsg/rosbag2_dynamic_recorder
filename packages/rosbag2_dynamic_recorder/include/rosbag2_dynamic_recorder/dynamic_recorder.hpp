@@ -34,6 +34,7 @@
 #include "rosbag2_dynamic_recorder/recorder_config.hpp"
 #include "rosbag2_dynamic_recorder/scheduler.hpp"
 #include "rosbag2_dynamic_recorder/storage_guard.hpp"
+#include "rosbag2_dynamic_recorder/timings.hpp"
 #include "rosbag2_storage/storage_options.hpp"
 
 #include "rosbag2_interfaces/msg/write_split_event.hpp"
@@ -74,6 +75,8 @@
 #endif
 #include "rosbag2_dynamic_recorder_interfaces/msg/low_disk_event.hpp"
 #include "rosbag2_dynamic_recorder_interfaces/msg/bag_size_limit_event.hpp"
+#include "rosbag2_dynamic_recorder_interfaces/msg/debug_timings.hpp"
+#include "rosbag2_dynamic_recorder_interfaces/msg/file_split_event.hpp"
 #include "rosbag2_dynamic_recorder_interfaces/msg/pause_event.hpp"
 #include "rosbag2_dynamic_recorder_interfaces/msg/profile.hpp"
 #include "rosbag2_dynamic_recorder_interfaces/msg/recorder_status.hpp"
@@ -140,7 +143,8 @@ public:
   bool is_paused() const;
 
   /// Close the current bag file and open the next one. Recording continues throughout.
-  bool split_bagfile();
+  /// `reason` is stamped onto the FileSplitEvent, as pause() and resume() stamp theirs.
+  bool split_bagfile(const std::string & reason);
 
   /// Flush the in-memory circular buffer to disk. Requires snapshot_mode.
   bool take_snapshot();
@@ -205,9 +209,11 @@ private:
   using SubscriptionChangeEvent =
     rosbag2_dynamic_recorder_interfaces::msg::SubscriptionChangeEvent;
   using PauseEvent = rosbag2_dynamic_recorder_interfaces::msg::PauseEvent;
+  using FileSplitEvent = rosbag2_dynamic_recorder_interfaces::msg::FileSplitEvent;
   using LowDiskEvent = rosbag2_dynamic_recorder_interfaces::msg::LowDiskEvent;
   using BagSizeLimitEvent = rosbag2_dynamic_recorder_interfaces::msg::BagSizeLimitEvent;
   using RecorderStatus = rosbag2_dynamic_recorder_interfaces::msg::RecorderStatus;
+  using DebugTimings = rosbag2_dynamic_recorder_interfaces::msg::DebugTimings;
   using WriteSplitEvent = rosbag2_interfaces::msg::WriteSplitEvent;
 #if ROSBAG2_DYNAMIC_RECORDER_HAS_UPSTREAM_MESSAGES_LOST_EVENT
   using MessagesLostEvent = rosbag2_interfaces::msg::MessagesLostEvent;
@@ -312,6 +318,9 @@ private:
   /// a change immediately rather than up to a tick later.
   void publish_status();
 
+  /// Publish the operations finished since the last call, and the write-lock contention.
+  void publish_debug_timings();
+
   /// Publish a subscription change on ~/events/subscription_change and, unless disabled, write it
   /// into the bag so the resulting sparse channel explains itself.
   void emit_subscription_change(
@@ -354,6 +363,20 @@ private:
   void emit_event(
     const typename rclcpp::Publisher<EventT>::SharedPtr & pub, bool record, EventT & event);
 
+  /// The in-bag half of emit_event(): write an already stamped and published event into the bag.
+  template<typename EventT>
+  void record_event(const typename rclcpp::Publisher<EventT>::SharedPtr & pub, const EventT & event);
+
+  /// A rollover to a new file: publish a FileSplitEvent now, and queue its in-bag copy. The writer
+  /// calls this from inside a write or a split with the bag's lock held, where writing into the
+  /// bag would deadlock, so the copy is written from the service group straight afterwards.
+  void on_rollover(
+    const rosbag2_cpp::bag_events::BagSplitInfo & info, const std::string & reason);
+
+  /// Write the queued FileSplitEvent copies into the bag. stop() calls it before closing, so a
+  /// rollover just before a stop is still explained.
+  void record_deferred_events();
+
   /// Graph topics a pattern is allowed to match.
   ///
   /// Excludes this node's own topics: the event channels are already written into the bag
@@ -379,16 +402,28 @@ private:
   /// The write-split and messages-lost callbacks a bag is opened with.
   Bag::EventCallbacks writer_event_callbacks();
 
-  /// Offer `~/<name>` on the service callback group, handled by `handler`.
+  /// Offer `~/<name>` on the service callback group, handled by `handler`. Every call that can
+  /// change something is a timed operation when debug_timings is on; reads (get_*, is_*) are not,
+  /// since a client polling status would bury the operations in noise.
   template<typename SrvT>
   typename rclcpp::Service<SrvT>::SharedPtr serve(
     const std::string & name,
     void (DynamicRecorder::* handler)(
       std::shared_ptr<typename SrvT::Request>, std::shared_ptr<typename SrvT::Response>))
   {
+    const bool timed = name.rfind("get_", 0) != 0 && name.rfind("is_", 0) != 0;
     return create_service<SrvT>(
       "~/" + name,
-      std::bind(handler, this, std::placeholders::_1, std::placeholders::_2),
+      [this, handler, name, timed](
+        std::shared_ptr<typename SrvT::Request> request,
+        std::shared_ptr<typename SrvT::Response> response)
+      {
+        std::optional<Timings::Operation> operation;
+        if (timed) {
+          operation.emplace(*timings_, name);
+        }
+        (this->*handler)(std::move(request), std::move(response));
+      },
       rclcpp::ServicesQoS(), service_callback_group_);
   }
 
@@ -421,6 +456,10 @@ private:
   rclcpp::Clock::SharedPtr clock_;
   /// The open bag, its channels and its counters. Owns the only writer lock.
   Bag bag_;
+  /// Always present, so the hooks never test for it; inert unless debug_timings is set.
+  std::unique_ptr<Timings> timings_;
+  rclcpp::Publisher<DebugTimings>::SharedPtr pub_debug_timings_;
+  rclcpp::TimerBase::SharedPtr debug_timings_timer_;
 
   /// A subscription, the switch that silences it, and its sequence bookkeeping.
   ///
@@ -474,6 +513,13 @@ private:
   rclcpp::Publisher<MessagesLostEvent>::SharedPtr pub_messages_lost_;
   rclcpp::Publisher<LowDiskEvent>::SharedPtr pub_low_disk_;
   rclcpp::Publisher<BagSizeLimitEvent>::SharedPtr pub_bag_size_limit_;
+  rclcpp::Publisher<FileSplitEvent>::SharedPtr pub_file_split_;
+
+  /// FileSplitEvents published but not yet written into the bag (see on_rollover()), and the
+  /// one-shot timer that writes them. Both under deferred_mutex_.
+  std::mutex deferred_mutex_;
+  std::vector<FileSplitEvent> deferred_split_events_;
+  rclcpp::TimerBase::SharedPtr deferred_timer_;
   rclcpp::Publisher<RecorderStatus>::SharedPtr pub_status_;
   rclcpp::TimerBase::SharedPtr status_timer_;
 

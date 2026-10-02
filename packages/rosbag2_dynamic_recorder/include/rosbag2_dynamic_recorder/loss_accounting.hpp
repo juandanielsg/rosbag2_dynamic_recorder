@@ -17,6 +17,7 @@
 
 #include <atomic>
 #include <cstdint>
+#include <map>
 #include <mutex>
 #include <string>
 #include <unordered_map>
@@ -32,7 +33,8 @@ namespace rosbag2_dynamic_recorder
 /// what the transport chose to report before delivery, a floor rather than a total; it points at
 /// the publisher, its QoS or the network. `lost_in_recorder` is what the writer dropped after
 /// delivery -- a full cache or a failed write -- and points at the cache, the storage preset,
-/// the topic set or the disk. Per-topic deltas are kept for the periodic MessagesLostEvent.
+/// the topic set or the disk. Per-topic deltas are kept for the periodic MessagesLostEvent, and
+/// per-topic totals over the bag for the status.
 ///
 /// Thread safety: the totals are atomics, the per-topic map has its own lock, and a sequence
 /// map belongs to one subscription and is only ever touched from that subscription's callback.
@@ -59,11 +61,16 @@ public:
     std::string topic;
     uint64_t in_transport{0};
     uint64_t in_recorder{0};
+    /// Only in topic_totals(); a drained report carries no missed figure.
+    uint64_t missed{0};
   };
 
   /// Record `sequence` from `publisher` on a subscription's map, counting any gap since the
-  /// last one as missed. The first sequence from a publisher establishes the position only.
-  void note_sequence(SequenceMap & seen, const std::string & publisher, uint64_t sequence);
+  /// last one as missed against `topic`. The first sequence from a publisher establishes the
+  /// position only. Takes no lock unless there is a gap.
+  void note_sequence(
+    SequenceMap & seen, const std::string & publisher, uint64_t sequence,
+    const std::string & topic);
 
   void note_transport_loss(const std::string & topic, uint64_t count);
   void note_recorder_loss(const std::string & topic, uint64_t count);
@@ -73,6 +80,10 @@ public:
   std::vector<TopicLoss> drain();
 
   Totals totals() const;
+
+  /// Every figure per topic over this bag, for each topic that has lost anything, sorted by name.
+  /// Unlike drain() it forgets nothing: it is what the status reports.
+  std::vector<TopicLoss> topic_totals() const;
 
   /// A new bag starts every figure at zero, including the undrained per-topic deltas: those
   /// were owed to the previous bag and must not open the next one's first report.
@@ -89,8 +100,11 @@ private:
     uint64_t in_transport{0};
     uint64_t in_recorder{0};
   };
-  std::mutex pending_mutex_;
+  /// Guards both per-topic maps.
+  mutable std::mutex pending_mutex_;
   std::unordered_map<std::string, Pending> pending_;
+  /// Ordered, so topic_totals() comes out sorted without a sort.
+  std::map<std::string, TopicLoss> per_topic_;
 };
 
 }  // namespace rosbag2_dynamic_recorder

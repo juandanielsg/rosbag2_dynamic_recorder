@@ -54,6 +54,7 @@ struct RecorderConfig
   bool record_pause_events{true};
   bool record_low_disk_events{true};
   bool record_bag_size_limit_events{true};
+  bool record_split_events{true};
 
   /// The disk guard: stop when free space falls below either bound. 0 disables that bound;
   /// both 0 disables the check, which is the default.
@@ -65,6 +66,10 @@ struct RecorderConfig
 
   double messages_lost_report_period_s{5.0};
   double status_publish_period_s{1.0};
+
+  /// Time the recorder's own operations and write-lock contention, and publish them on
+  /// ~/debug/timings. For the benchmark; off costs nothing.
+  bool debug_timings{false};
 
   bool low_disk_check_enabled() const {return min_free_space > 0 || min_free_space_percent > 0.0;}
   bool bag_size_check_enabled() const {return max_bag_size > 0;}

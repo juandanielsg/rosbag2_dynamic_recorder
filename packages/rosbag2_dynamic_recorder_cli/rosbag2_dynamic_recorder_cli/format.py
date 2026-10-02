@@ -22,6 +22,8 @@ The time dialect and the mode mapping are dynrec.schedule's -- the verbs hand `-
 `dynrec.Recorder`, so there is no second copy here to drift from it.
 """
 
+from datetime import datetime
+
 from dynrec.schedule import TIME_MODES
 
 #: Width of the label column in `status`: the longest label, 'lost (transport):', plus a gap.
@@ -113,6 +115,30 @@ def free_space_text(status):
     return text
 
 
+def format_clock_time(seconds, use_sim_time):
+    """A time on the recorder's clock. Under sim time that is the simulation's, not a date."""
+    if use_sim_time:
+        return 't={:.1f}s on the simulation clock'.format(seconds)
+    return datetime.fromtimestamp(seconds).strftime('%Y-%m-%d %H:%M:%S')
+
+
+def format_schedule(scheduled, use_sim_time):
+    """One pending :class:`dynrec.Scheduled`, saying which clock it waits on."""
+    when = format_clock_time(scheduled.at, use_sim_time)
+    if scheduled.mode == 'node':
+        return '{} at {} (node time, fires on a timer)'.format(scheduled.action, when)
+    return '{} at {} by {} time, on {} (waits for traffic)'.format(
+        scheduled.action, when, scheduled.mode,
+        scheduled.topic or 'any recorded topic')
+
+
+def format_topic_loss(loss):
+    """One :class:`dynrec.TopicLoss`, with missed unknown where the totals say so too."""
+    missed = 'unknown' if loss.missed is None else str(loss.missed)
+    return '{}: missed {}, lost {} in transport, {} in recorder'.format(
+        loss.topic, missed, loss.lost_in_transport, loss.lost_in_recorder)
+
+
 def _row(label, value):
     """One aligned line of the status block. An empty label continues the row above."""
     return '{:<{}}{}'.format(label + ':' if label else '', LABEL_WIDTH, value)
@@ -157,4 +183,11 @@ def format_status(status):
         ('free space', free_space_text(status)),
     ]
     lines.extend(_row(label, value) for label, value in counters)
+    # Only when there is something to say, as with empty topic groups: a line per topic that lost
+    # nothing, or a "scheduled: none", would bury the lines that matter.
+    for index, loss in enumerate(status.topic_losses):
+        lines.append(_row('by topic' if index == 0 else '', format_topic_loss(loss)))
+    for index, scheduled in enumerate(status.schedules):
+        lines.append(_row('scheduled' if index == 0 else '',
+                          format_schedule(scheduled, status.use_sim_time)))
     return lines

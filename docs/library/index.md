@@ -64,11 +64,17 @@ and the most consequential: a person reading a CLI number might notice, but code
 number against a threshold will not.
 
 `messages_lost_reported` is renamed on the way out for the same reason. It counts only what the
-transport and the writer admitted to, and has read 0 against a bag that was genuinely missing 3–4%
+transport and the writer admitted to, and has read 0 against a bag that was genuinely missing 3-4%
 of its messages. Its two halves are also exposed separately: `messages_lost_in_transport` is the
 transport's report and shares that caveat; `messages_lost_in_recorder` is the writer's own drops
 (cache full, or a write that failed) and is known with certainty. A script deciding whether the
 disk is keeping up should look at the second, not the sum.
+
+`Status.topic_losses` breaks those figures down by topic, as {py:class}`~dynrec.results.TopicLoss`,
+for each topic that has lost anything in the bag; its `missed` is `None` exactly when the total's
+is. `Status.schedules` lists what is queued for later, as {py:class}`~dynrec.results.Scheduled`:
+`action` (`'resume'`, `'split'`, `'record'`), `at` on the clock `mode` names, and the tracking
+`topic`. It includes schedules any client set.
 
 ## 3. It can watch
 
@@ -81,11 +87,12 @@ rec.on_status(lambda s: print(s.messages_written))
 rec.wait_for(lambda s: not s.recording, timeout=60)
 ```
 
-All four event streams arrive flattened into one {py:class}`~dynrec.results.Event`, because a
-channel that stops, a bag that stops, and a recording the recorder ended itself are the same question
-asked twice. The last two are the recorder's own stops: a `low_disk` event when free space falls
-below its configured minimum, and a `bag_size_limit` event when the bag grows past `max_bag_size`.
-Either way a supervisor can react without polling.
+All five event streams arrive flattened into one {py:class}`~dynrec.results.Event`, because a
+channel that stops, a bag that stops, a file that ends, and a recording the recorder ended itself
+are the same question asked several ways. A `split` event names the `closed_file` and
+`opened_file` of a rollover and why it happened. The last two kinds are the recorder's own stops: a
+`low_disk` event when free space falls below its configured minimum, and a `bag_size_limit` event
+when the bag grows past `max_bag_size`. Either way a supervisor can react without polling.
 
 ```python
 rec.on_event(lambda e: e.kind in ('low_disk', 'bag_size_limit') and shutdown())
@@ -94,6 +101,13 @@ rec.on_event(lambda e: e.kind in ('low_disk', 'bag_size_limit') and shutdown())
 They come in on separate subscriptions, so sort by `event.stamp`, the recorder's clock, rather than
 trusting the order they were delivered in. The same state is on the status, as `free_space_bytes`,
 `total_space_bytes` and `stopped_for_low_disk`, and `max_bag_size` and `stopped_for_max_bag_size`.
+
+Under `use_sim_time` the recorder's clock is the simulation's, so `event.stamp`,
+`Status.recording_started` and every rate `describe()` reports are in simulated seconds.
+`Status.waiting_for_clock` is true until the first `/clock` arrives, during which no bag is open and
+a topic change is refused; the status topic is still latched and published, so `wait_for` can wait
+it out rather than treating it as a failure. See
+[Simulation time](../services.md#simulation-time).
 
 `wait_for` is written against the latched status topic rather than a polling loop, so the current
 state counts: `rec.wait_for(lambda s: not s.recording)` returns at once if the recorder is already

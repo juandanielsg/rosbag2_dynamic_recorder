@@ -110,3 +110,51 @@ TEST_F(SchedulerTest, a_node_time_timer_fires_once_and_the_newest_arming_wins)
   scheduler_->clear();
   EXPECT_FALSE(spin_until(cleared, std::chrono::milliseconds(100)));
 }
+
+TEST_F(SchedulerTest, pending_reports_each_schedule_until_it_fires)
+{
+  EXPECT_TRUE(scheduler_->pending().empty());
+
+  const auto before = node_->now().nanoseconds();
+  bool resumed = false;
+  scheduler_->arm(Kind::Resume, std::chrono::milliseconds(30), [&]() {resumed = true;});
+  scheduler_->schedule_at_message_time(Kind::Split, 5000, Mode::ReceiveTime, "/scan");
+  scheduler_->arm(Kind::Record, std::chrono::seconds(60), []() {});
+
+  auto pending = scheduler_->pending();
+  ASSERT_EQ(pending.size(), 3u);
+  EXPECT_EQ(pending[0].kind, Kind::Resume);
+  EXPECT_EQ(pending[0].mode, Mode::NodeTime);
+  EXPECT_GE(pending[0].at_ns, before + 30'000'000) << "a node-time entry carries its node time";
+  EXPECT_EQ(pending[1].kind, Kind::Split);
+  EXPECT_EQ(pending[1].at_ns, 5000);
+  EXPECT_EQ(pending[1].mode, Mode::ReceiveTime);
+  EXPECT_EQ(pending[1].tracking_topic, "/scan");
+  EXPECT_EQ(pending[2].kind, Kind::Record);
+
+  ASSERT_TRUE(spin_until(resumed, std::chrono::seconds(2)));
+  EXPECT_TRUE(scheduler_->fired("/scan", 0, 5000).split);
+  pending = scheduler_->pending();
+  ASSERT_EQ(pending.size(), 1u) << "a fired schedule leaves the list, by timer or by message";
+  EXPECT_EQ(pending[0].kind, Kind::Record);
+
+  scheduler_->clear();
+  EXPECT_EQ(scheduler_->pending().size(), 1u) << "a scheduled record survives a stop";
+}
+
+TEST_F(SchedulerTest, the_newest_schedule_of_a_kind_wins_whichever_clock_it_is_on)
+{
+  // A message-time resume replaces a node-time one: the timer must not fire as well.
+  bool by_timer = false;
+  scheduler_->arm(Kind::Resume, std::chrono::milliseconds(20), [&]() {by_timer = true;});
+  scheduler_->schedule_at_message_time(Kind::Resume, 1000, Mode::PublishTime, "");
+  EXPECT_FALSE(spin_until(by_timer, std::chrono::milliseconds(150)));
+  ASSERT_EQ(scheduler_->pending().size(), 1u);
+  EXPECT_EQ(scheduler_->pending()[0].mode, Mode::PublishTime);
+
+  // And a node-time one replaces a message-time one: messages must no longer fire it.
+  scheduler_->arm(Kind::Resume, std::chrono::seconds(60), []() {});
+  EXPECT_FALSE(scheduler_->fired("/a", 2000, 2000).resume);
+  ASSERT_EQ(scheduler_->pending().size(), 1u);
+  EXPECT_EQ(scheduler_->pending()[0].mode, Mode::NodeTime);
+}

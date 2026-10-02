@@ -83,6 +83,7 @@ RecorderConfig declare_parameters(rclcpp::Node & node)
   c.record_low_disk_events = node.declare_parameter<bool>("record_low_disk_events", true);
   c.record_bag_size_limit_events =
     node.declare_parameter<bool>("record_bag_size_limit_events", true);
+  c.record_split_events = node.declare_parameter<bool>("record_split_events", true);
   c.snapshot_mode = node.declare_parameter<bool>("snapshot_mode", false);
   c.storage.snapshot_mode = c.snapshot_mode;
 
@@ -136,6 +137,7 @@ RecorderConfig declare_parameters(rclcpp::Node & node)
   c.messages_lost_report_period_s =
     node.declare_parameter<double>("messages_lost_report_period", 5.0);
   c.status_publish_period_s = node.declare_parameter<double>("status_publish_period", 1.0);
+  c.debug_timings = node.declare_parameter<bool>("debug_timings", false);
   c.start_paused = node.declare_parameter<bool>("start_paused", false);
   c.use_sim_time = node.get_parameter("use_sim_time").as_bool();
   c.initial_topics = node.declare_parameter<std::vector<std::string>>(

@@ -16,6 +16,7 @@
 
 #include <string>
 #include <utility>
+#include <vector>
 
 namespace rosbag2_dynamic_recorder
 {
@@ -44,18 +45,45 @@ rclcpp::TimerBase::SharedPtr & Scheduler::slot(Kind kind)
   }
 }
 
+Scheduler::Pending & Scheduler::pending_for(Kind kind)
+{
+  switch (kind) {
+    case Kind::Resume: return resume_;
+    case Kind::Split: return split_;
+    default: return record_;
+  }
+}
+
+void Scheduler::update_fast_path_locked()
+{
+  const auto by_message = [](const Pending & p) {return p.active && p.mode != Mode::NodeTime;};
+  pending_.store(by_message(resume_) || by_message(split_), std::memory_order_relaxed);
+}
+
 void Scheduler::arm(Kind kind, std::chrono::nanoseconds delta, std::function<void()> action)
 {
   auto & timer = slot(kind);
   if (timer) {
     timer->cancel();
   }
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    // Replaces a message-time schedule of this kind too: only the newest is live.
+    pending_for(kind) = {true, node_.now().nanoseconds() + delta.count(), Mode::NodeTime, ""};
+    update_fast_path_locked();
+  }
   // The node clock rather than a wall timer, so under use_sim_time a schedule keeps to the
   // simulation's time even when it runs slow or pauses.
   timer = node_.create_timer(
     delta,
-    [&timer, action = std::move(action)]() {
+    [this, kind, &timer, action = std::move(action)]() {
       timer->cancel();  // One shot.
+      {
+        // Off the list before the action runs, so a status the action publishes no longer shows
+        // it. A newer schedule would have cancelled this timer first, so the slot is still ours.
+        std::lock_guard<std::mutex> lock(mutex_);
+        pending_for(kind).active = false;
+      }
       action();
     },
     group_);
@@ -64,9 +92,28 @@ void Scheduler::arm(Kind kind, std::chrono::nanoseconds delta, std::function<voi
 void Scheduler::schedule_at_message_time(
   Kind kind, rcutils_time_point_value_t at_ns, Mode mode, const std::string & tracking_topic)
 {
+  // Retire a node-time timer of this kind: the newest schedule replaces it.
+  if (auto & timer = slot(kind)) {
+    timer->cancel();
+  }
   std::lock_guard<std::mutex> lock(mutex_);
-  (kind == Kind::Resume ? resume_ : split_) = {true, at_ns, mode, tracking_topic};
-  pending_.store(true, std::memory_order_relaxed);
+  pending_for(kind) = {true, at_ns, mode, tracking_topic};
+  update_fast_path_locked();
+}
+
+std::vector<Scheduler::Scheduled> Scheduler::pending() const
+{
+  std::lock_guard<std::mutex> lock(mutex_);
+  std::vector<Scheduled> out;
+  const auto add = [&out](Kind kind, const Pending & p) {
+      if (p.active) {
+        out.push_back({kind, p.at_ns, p.mode, p.tracking_topic});
+      }
+    };
+  add(Kind::Resume, resume_);
+  add(Kind::Split, split_);
+  add(Kind::Record, record_);
+  return out;
 }
 
 bool Scheduler::Pending::satisfied_by(
@@ -99,7 +146,7 @@ Scheduler::Fired Scheduler::fired(
   resume_.active = resume_.active && !fired.resume;
   split_.active = split_.active && !fired.split;
   // Keep the fast path honest: only a schedule still active warrants taking the lock again.
-  pending_.store(resume_.active || split_.active, std::memory_order_relaxed);
+  update_fast_path_locked();
   return fired;
 }
 
@@ -109,7 +156,7 @@ void Scheduler::clear()
     std::lock_guard<std::mutex> lock(mutex_);
     resume_ = {};
     split_ = {};
-    pending_.store(false, std::memory_order_relaxed);
+    update_fast_path_locked();
   }
   for (auto * timer : {&resume_timer_, &split_timer_}) {
     if (*timer) {

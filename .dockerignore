@@ -1,0 +1,6 @@
+# Generated trees never belong in a build context. colcon's log/ in particular holds Linux
+# symlinks (latest_build, ...) that the Windows host cannot open, which fails the build before it
+# starts; build/ and install/ would only slow the transfer.
+build/
+install/
+log/

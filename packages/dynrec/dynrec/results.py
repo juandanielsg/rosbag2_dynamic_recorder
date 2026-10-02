@@ -37,11 +37,59 @@ SUBSCRIPTION_ACTIONS = {0: 'subscribed', 1: 'unsubscribed'}
 PAUSE_ACTIONS = {0: 'paused', 1: 'resumed'}
 #: Shared by LowDiskEvent and BagSizeLimitEvent: a self-inflicted stop is their only action.
 STOP_ACTIONS = {0: 'stopped'}
+#: ScheduledAction's action and mode constants. The mode words are the ones `mode=` takes.
+SCHEDULE_ACTIONS = {0: 'resume', 1: 'split', 2: 'record'}
+SCHEDULE_MODES = {0: 'node', 1: 'publish', 2: 'receive'}
 
 
 def _stamp_seconds(stamp):
     """A builtin_interfaces/Time as epoch seconds on the recorder's clock."""
     return stamp.sec + stamp.nanosec / NANOSECONDS_PER_SECOND
+
+
+@dataclass(frozen=True)
+class Scheduled:
+    """An operation the recorder will perform later: one entry of :attr:`Status.schedules`."""
+
+    #: 'resume', 'split' or 'record'.
+    action: str
+    #: When it fires, as epoch seconds on the clock `mode` names. For 'node' that is the
+    #: recorder's clock, the one `Status.recording_started` is on.
+    at: float
+    #: 'node' fires on a timer; 'publish' and 'receive' wait for a message stamped that late.
+    mode: str
+    #: For 'publish' and 'receive': the topic whose messages are checked, or '' for any topic.
+    topic: str = ''
+
+    @classmethod
+    def from_msg(cls, msg):
+        return cls(
+            action=SCHEDULE_ACTIONS.get(msg.action, str(msg.action)),
+            at=_stamp_seconds(msg.time),
+            mode=SCHEDULE_MODES.get(msg.mode, str(msg.mode)),
+            topic=msg.tracking_topic,
+        )
+
+
+@dataclass(frozen=True)
+class TopicLoss:
+    """What one topic has lost in the current bag: one entry of :attr:`Status.topic_losses`."""
+
+    topic: str
+    #: From sequence-number gaps. None where the middleware supplies no sequence numbers, as for
+    #: :attr:`Status.messages_missed`.
+    missed: Optional[int]
+    lost_in_transport: int
+    lost_in_recorder: int
+
+    @classmethod
+    def from_msg(cls, msg, sequence_ok):
+        return cls(
+            topic=msg.topic_name,
+            missed=msg.messages_missed if sequence_ok else None,
+            lost_in_transport=msg.messages_lost_in_transport,
+            lost_in_recorder=msg.messages_lost_in_recorder,
+        )
 
 
 @dataclass(frozen=True)
@@ -106,6 +154,12 @@ class Status:
     #: True under `use_sim_time` until the first `/clock` message: no bag is open yet, and every
     #: call that needs one is refused until then.
     waiting_for_clock: bool = False
+    #: Resumes, splits and records queued for later, at most one of each, in that order. Includes
+    #: schedules any client set. There is no call to cancel one; scheduling again replaces it.
+    schedules: List[Scheduled] = field(default_factory=list)
+    #: The loss figures broken down by topic, for each topic that has lost anything in this bag,
+    #: sorted by name. Empty when nothing has been lost.
+    topic_losses: List[TopicLoss] = field(default_factory=list)
     #: When the recorder built this status, as epoch seconds on its clock: that clock's reading as
     #: of now, give or take delivery. `elapsed_seconds` stops counting at a stop; this does not.
     stamp: float = 0.0
@@ -142,6 +196,8 @@ class Status:
             stopped_for_max_bag_size=bool(msg.stopped_for_max_bag_size),
             use_sim_time=bool(msg.use_sim_time),
             waiting_for_clock=bool(msg.waiting_for_clock),
+            schedules=[Scheduled.from_msg(s) for s in msg.schedules],
+            topic_losses=[TopicLoss.from_msg(t, sequence_ok) for t in msg.topic_losses],
             stamp=_stamp_seconds(msg.stamp),
         )
 
@@ -225,21 +281,21 @@ class Profiles:
 
 @dataclass(frozen=True)
 class Event:
-    """One thing that happened to the recording, from one of four event streams.
+    """One thing that happened to the recording, from one of five event streams.
 
-    All four are flattened into one shape because a caller watching for "what changed" wants them
+    All five are flattened into one shape because a caller watching for "what changed" wants them
     interleaved, and because they are only meaningful together: a subscription event explains a
-    channel that stops, a pause event explains a bag that stops, and a low-disk or bag-size-limit
-    event explains a recording the recorder ended itself, to protect the filesystem or to honour
-    a cap on the bag.
+    channel that stops, a pause event explains a bag that stops, a split event explains where one
+    file ends and the next begins, and a low-disk or bag-size-limit event explains a recording the
+    recorder ended itself, to protect the filesystem or to honour a cap on the bag.
 
     `stamp` is on the recorder's clock. Sort by it rather than by arrival: the streams come in on
     separate subscriptions, so delivery order is not the order things happened.
     """
 
-    #: 'subscription', 'pause', 'low_disk' or 'bag_size_limit'.
+    #: 'subscription', 'pause', 'split', 'low_disk' or 'bag_size_limit'.
     kind: str
-    #: 'subscribed', 'unsubscribed', 'paused', 'resumed' or 'stopped'.
+    #: 'subscribed', 'unsubscribed', 'paused', 'resumed', 'split' or 'stopped'.
     action: str
     #: Epoch seconds on the recorder's clock.
     stamp: float
@@ -258,6 +314,10 @@ class Event:
     #: exceeded. Zero on the other kinds.
     bag_size_bytes: int = 0
     max_bag_size: int = 0
+    #: For a split event: the file that was closed and the file recording continues in. Empty on
+    #: the other kinds.
+    closed_file: str = ''
+    opened_file: str = ''
 
     @classmethod
     def from_subscription_msg(cls, msg):
@@ -279,6 +339,18 @@ class Event:
             stamp=_stamp_seconds(msg.stamp),
             reason=msg.reason,
             node_name=msg.node_name,
+        )
+
+    @classmethod
+    def from_file_split_msg(cls, msg):
+        return cls(
+            kind='split',
+            action='split',
+            stamp=_stamp_seconds(msg.stamp),
+            reason=msg.reason,
+            node_name=msg.node_name,
+            closed_file=msg.closed_file,
+            opened_file=msg.opened_file,
         )
 
     @classmethod
@@ -312,6 +384,7 @@ class Event:
 EVENT_STREAMS = {
     '/events/subscription_change': ('SubscriptionChangeEvent', Event.from_subscription_msg),
     '/events/pause': ('PauseEvent', Event.from_pause_msg),
+    '/events/file_split': ('FileSplitEvent', Event.from_file_split_msg),
     '/events/low_disk': ('LowDiskEvent', Event.from_low_disk_msg),
     '/events/bag_size_limit': ('BagSizeLimitEvent', Event.from_bag_size_limit_msg),
 }

@@ -12,6 +12,19 @@
 ###############################################################################
 
 ARG ROS_DISTRO=rolling
+
+# --- The package manifests, and nothing else ---------------------------------
+# A stage of its own so the rosdep layer below depends on the manifests' content only: this stage
+# reruns on any source change, but COPY --from compares what it produced, and that is unchanged
+# until a package.xml is. Each manifest keeps its own directory. A plain
+# `COPY packages/*/package.xml <dir>/` cannot do that: every source is named package.xml, so each
+# overwrote the last and rosdep only ever saw one package's dependencies.
+FROM ros:${ROS_DISTRO}-ros-base AS manifests
+COPY packages /tmp/packages
+RUN cd /tmp/packages && for f in */package.xml; do \
+      mkdir -p "/tmp/rosdep/$(dirname "$f")" && cp "$f" "/tmp/rosdep/$f"; \
+    done
+
 FROM ros:${ROS_DISTRO}-ros-base
 # A FROM line ends the scope of the ARGs before it; redeclare to use it below.
 ARG ROS_DISTRO
@@ -34,15 +47,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # failure is silent and only shows up much later as a CMake "could not find ..." error.
 
 # --- Package dependencies, from the manifests -------------------------------
-# Only the package.xml files are copied in, so this layer is rebuilt when a <depend> changes and
-# not when code does. The source itself is bind-mounted at runtime. rosdep wants one package per
-# directory, so each manifest is placed under a directory named after it.
-COPY packages/*/package.xml /tmp/manifests/
+# Only the package.xml files are copied in (see the manifests stage), so this layer is rebuilt when
+# a <depend> changes and not when code does. The source itself is bind-mounted at runtime.
+COPY --from=manifests /tmp/rosdep /tmp/rosdep
 RUN set -e; \
-    for f in /tmp/manifests/*.xml; do \
-      name=$(sed -n 's:.*<name>\(.*\)</name>.*:\1:p' "$f"); \
-      mkdir -p "/tmp/rosdep/$name" && cp "$f" "/tmp/rosdep/$name/package.xml"; \
-    done; \
     apt-get update; \
     for attempt in 1 2 3 4 5; do \
       rosdep update && break; \
@@ -50,7 +58,7 @@ RUN set -e; \
       sleep $((attempt * 10)); \
     done; \
     rosdep install --from-paths /tmp/rosdep --ignore-src -r -y; \
-    rm -rf /tmp/manifests /tmp/rosdep
+    rm -rf /tmp/rosdep
 
 # --- mcap CLI (optional dev tool) -------------------------------------------
 # For inspecting recorded bags by hand (`mcap info` / `mcap doctor`). Tolerated as a best-effort
