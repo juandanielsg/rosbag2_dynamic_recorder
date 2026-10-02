@@ -84,8 +84,8 @@ differently named recorder means running `ui_node` yourself.
 ## What it is built from
 
 `rclpy`, `ament_index_python`, the project's own `dynrec` library and the Python standard library. No web framework, no npm build step
-and no CDN: the page is a single static file served from the package, so it loads on a robot with no
-internet. Every dependency added there would be an install barrier in front of the people this is
+and no CDN: the page is three static files (`index.html`, `style.css` and `app.js`) served from the
+package, so it loads on a robot with no internet. Every dependency added there would be an install barrier in front of the people this is
 meant to be usable by.
 
 It is a separate node rather than an HTTP server inside the recorder, so the recorder's write path
